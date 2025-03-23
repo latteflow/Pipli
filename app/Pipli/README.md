@@ -4,6 +4,9 @@
 React Native: 
 https://reactnative.dev/docs/environment-setup
 
+Install Expo GO from Play Store
+
+
 
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
 
