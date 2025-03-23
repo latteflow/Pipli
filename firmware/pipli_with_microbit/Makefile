@@ -1,4 +1,4 @@
-all: compile 
+all: upload_ monitor_ 
 upload: upload_
 monitor: monitor_
 compile: compile_
