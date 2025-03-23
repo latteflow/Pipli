@@ -1,6 +1,12 @@
+/*
+ * Blink
+ * Turns on an LED on for one second,
+ * then off for one second, repeatedly.
+ */
+
 #include <Arduino.h>
 
-#define LED_ROW1 4
+#define LED_ROW1 6
 
 void setup()
 {
@@ -19,5 +25,5 @@ void loop()
   digitalWrite(LED_ROW1, LOW);
   // wait for a second
   delay(1000);
-  Serial.println("hello");
+  Serial.println("Hello World");
 }

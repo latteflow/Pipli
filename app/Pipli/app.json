@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "Pipli",
-    "slug": "Pipli",
+    "slug": "pipli",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
@@ -36,6 +36,15 @@
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      },
+      "eas": {
+        "projectId": "473726d5-5816-4269-9e19-4f8751faf1c7"
+      }
+    },
+    "owner": "latteflow"
   }
 }
