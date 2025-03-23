@@ -1,4 +1,4 @@
-all: compile 
+all: upload monitor
 upload: upload_esp32
 monitor: monitor_esp32
 compile: compile_esp32
