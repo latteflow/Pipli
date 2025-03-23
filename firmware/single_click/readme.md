@@ -8,6 +8,12 @@ Platform IO
 Pio CLI 
 
 
+## ESP32 
+1. Make bluetooth work 
+2. File sytem to Save JSON 
+3. 
+
+
 
 when pressing mechanical switches, it will debounce. The switch turn on and off multiple times before it settles.
 This is due to the mechanical nature of the switch. To debounce, we can use a software solution.
