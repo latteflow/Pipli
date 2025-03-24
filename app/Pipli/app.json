@@ -30,7 +30,17 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "react-native-ble-plx",
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": true,
+          "modes": [
+            "peripheral",
+            "central"
+          ],
+          "bluetoothAlwaysPermission": "Allow Pipli to connect to bluetooth devices"
+        }
+      ],
       "expo-router",
       [
         "expo-splash-screen",
