@@ -2,6 +2,9 @@
 #include "FS.h"
 #include <LittleFS.h>
 
+// JSON data library
+#include <ArduinoJson.h>
+
 #define FORMAT_LITTLEFS_IF_FAILED true
 
 void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
@@ -79,6 +82,19 @@ void readFile(fs::FS &fs, const char *path)
     Serial.println("- failed to open file for reading");
     return;
   }
+
+  JsonDocument doc;
+  deserializeJson(doc, file);
+  const char *sensor = doc["sensor"];
+  long time = doc["time"];
+  double latitude = doc["data"][0];
+  double longitude = doc["data"][1];
+
+  Serial.println(sensor);
+  Serial.println(time);
+  Serial.println(latitude, 6);
+  Serial.println(longitude, 6);
+  Serial.println("Json parse working");
 
   Serial.println("- read from file:");
   while (file.available())
@@ -229,21 +245,33 @@ void setup()
     Serial.println("LittleFS Mount Failed");
     return;
   }
+
+  // JSON input string.
+  const char *json = "{\"sensor\":\"gps\",\"time\":1351824120,\"data\":[48.756080,2.302038]}";
+  delay(3000);
   listDir(LittleFS, "/", 3);
   createDir(LittleFS, "/mydir");
-  writeFile(LittleFS, "/mydir/hello2.txt", "Hello2");
+  writeFile(LittleFS, "/mydir/hello.txt", json);
   listDir(LittleFS, "/", 1);
-  deleteFile(LittleFS, "/mydir/hello2.txt");
-  removeDir(LittleFS, "/mydir");
-  listDir(LittleFS, "/", 1);
-  writeFile(LittleFS, "/hello.txt", "Hello ");
-  appendFile(LittleFS, "/hello.txt", "World!\r\n");
-  readFile(LittleFS, "/hello.txt");
-  renameFile(LittleFS, "/hello.txt", "/foo.txt");
-  readFile(LittleFS, "/foo.txt");
-  deleteFile(LittleFS, "/foo.txt");
-  testFileIO(LittleFS, "/test.txt");
-  deleteFile(LittleFS, "/test.txt");
+  readFile(LittleFS, "/mydir/hello.txt");
+  // deleteFile(LittleFS, "/mydir/hello2.txt");
+  // testFileIO(LittleFS, "/test.txt");
+  // deleteFile(LittleFS, "/test.txt");
+
+  // read file and open
+  // File file = LittleFS.open("/mydir/hello.txt");
+  // if (!file || file.isDirectory())
+  // {
+  //   Serial.println("- failed to open file for reading");
+  //   return;
+  // }
+
+  // Serial.println("- read from file:");
+  // while (file.available())
+  // {
+  //   Serial.write(file.read());
+  // }
+  // file.close();
 
   Serial.println("Test complete");
 }
