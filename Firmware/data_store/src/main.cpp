@@ -254,26 +254,6 @@ void setup()
   writeFile(LittleFS, "/mydir/hello.txt", json);
   listDir(LittleFS, "/", 1);
   readFile(LittleFS, "/mydir/hello.txt");
-  // deleteFile(LittleFS, "/mydir/hello2.txt");
-  // testFileIO(LittleFS, "/test.txt");
-  // deleteFile(LittleFS, "/test.txt");
-
-  // read file and open
-  // File file = LittleFS.open("/mydir/hello.txt");
-  // if (!file || file.isDirectory())
-  // {
-  //   Serial.println("- failed to open file for reading");
-  //   return;
-  // }
-
-  // Serial.println("- read from file:");
-  // while (file.available())
-  // {
-  //   Serial.write(file.read());
-  // }
-  // file.close();
-
-  Serial.println("Test complete");
 }
 
 void loop() {}
