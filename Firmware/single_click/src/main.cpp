@@ -37,6 +37,10 @@ uint32_t value = 0;
 #define SERVICE_UUID "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
+#define VIBRATION_PIN 19
+#define PAIR_PIN 23
+#define USER_PIN 34
+
 class MyServerCallbacks : public BLEServerCallbacks
 {
   void onConnect(BLEServer *pServer)
@@ -54,6 +58,10 @@ class MyServerCallbacks : public BLEServerCallbacks
 void setup()
 {
   Serial.begin(115200);
+
+  pinMode(VIBRATION_PIN, OUTPUT);
+  pinMode(PAIR_PIN, INPUT);
+  pinMode(USER_PIN, INPUT);
 
   // Create the BLE Device
   BLEDevice::init("ESP32");
@@ -88,6 +96,36 @@ void setup()
 
 void loop()
 {
+
+  // check if the button is pressed
+  if (digitalRead(USER_PIN) == HIGH)
+  {
+    Serial.println("User 34 button pressed");
+    // notify changed value
+    digitalWrite(VIBRATION_PIN, HIGH);
+  }
+
+  if (digitalRead(PAIR_PIN) == HIGH)
+  {
+    Serial.println("User 23 button pressed");
+    // notify changed value
+    digitalWrite(VIBRATION_PIN, HIGH);
+    delay(100);
+  }
+
+  if (digitalRead(PAIR_PIN) == LOW)
+  {
+    Serial.println("User 23 button released");
+    // notify changed value
+    digitalWrite(VIBRATION_PIN, LOW);
+  }
+  if (digitalRead(USER_PIN) == LOW)
+  {
+    Serial.println("User 34 button released");
+    // notify changed value
+    digitalWrite(VIBRATION_PIN, LOW);
+  }
+
   // notify changed value
   if (deviceConnected)
   {
