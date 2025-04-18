@@ -29,7 +29,6 @@ BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
-uint32_t value = 0;
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -40,6 +39,9 @@ uint32_t value = 0;
 #define VIBRATION_PIN 19
 #define PAIR_PIN 23
 #define USER_PIN 34
+#define MTU 200 // Maximum Transmission Unit
+
+int value = 0;
 
 class MyServerCallbacks : public BLEServerCallbacks
 {
@@ -64,7 +66,7 @@ void setup()
   pinMode(USER_PIN, INPUT);
 
   // Create the BLE Device
-  BLEDevice::init("ESP32");
+  BLEDevice::init("Pipli");
 
   // Create the BLE Server
   pServer = BLEDevice::createServer();
@@ -104,36 +106,39 @@ void loop()
     // notify changed value
     digitalWrite(VIBRATION_PIN, HIGH);
   }
-
-  if (digitalRead(PAIR_PIN) == HIGH)
+  else if (digitalRead(PAIR_PIN) == HIGH)
   {
-    Serial.println("User 23 button pressed");
+    // Serial.println("User 23 button pressed");
     // notify changed value
     digitalWrite(VIBRATION_PIN, HIGH);
-    delay(100);
   }
-
-  if (digitalRead(PAIR_PIN) == LOW)
+  else
   {
-    Serial.println("User 23 button released");
-    // notify changed value
-    digitalWrite(VIBRATION_PIN, LOW);
-  }
-  if (digitalRead(USER_PIN) == LOW)
-  {
-    Serial.println("User 34 button released");
-    // notify changed value
     digitalWrite(VIBRATION_PIN, LOW);
   }
 
   // notify changed value
   if (deviceConnected)
   {
-    // pCharacteristic->setValue((uint8_t *)&value, 4);
+
+    String str = "Hello from Pipli!" + String(value); // String to send
+    int str_len = str.length() + 1;
+
+    // Prepare the character array (the buffer)
+    char char_array[MTU]; // MTU
+
+    // Copy it over
+    str.toCharArray(char_array, str_len);
+    pCharacteristic->setValue(char_array); // to send a test message
+    //    pCharacteristic->setValue(txString);  // prepare to send array
+    pCharacteristic->notify(); // send the value to the app!
+
+    // pCharacteristic->setValue(value.c_str());
     // pCharacteristic->notify();
-    // value++;
-    std::string rx = pCharacteristic->getValue();
-    Serial.println(rx.c_str());
+    value++;
+
+    // std::string rx = pCharacteristic->getValue();
+    // Serial.println(rx.c_str());
 
     delay(2000); // bluetooth stack will go into congestion, if too many packets are sent, in 6 hours test i was able to go as low as 3ms
   }
