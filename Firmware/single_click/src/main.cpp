@@ -70,7 +70,7 @@ void stopVibration();
 bool loadSchedule();
 bool saveSchedule();
 void processSchedule();
-void sendUpdate();
+void sendUpdate(bool changeStateToIdleOnSuccess = true);
 // void moveToNextReminder(); // No longer needed
 void handleReceivedData(const std::string &data);
 
@@ -151,7 +151,7 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
                 Serial.println("Received update request command.");
                 // Attempt to send the update immediately if connected
                 // sendUpdate() already checks for connection and loaded data
-                sendUpdate();
+                sendUpdate(false);
             }
             else
             {
@@ -440,14 +440,14 @@ void recordResponse(bool responded)
     Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
 }
 
-void sendUpdate()
+// -- -MODIFIED sendUpdate function signature-- -
+void sendUpdate(bool changeStateToIdleOnSuccess) // Add parameter with default true
 {
     // --- Check connection FIRST ---
     if (!deviceConnected)
     {
         Serial.println("Cannot send update: Device not connected. Update pending.");
-        // Don't change state here. The state machine will handle it.
-        // The updated scheduleDoc remains loaded.
+        // Don't change state here regardless of the parameter, just return.
         return; // Exit without sending
     }
 
@@ -455,7 +455,7 @@ void sendUpdate()
     if (!scheduleLoaded || scheduleDoc.isNull())
     {
         Serial.println("Cannot send update: No schedule data loaded.");
-        // If there's no data, we can safely go idle.
+        // If there's no data, we can safely go idle, regardless of why called.
         currentState = STATE_IDLE;
         return;
     }
@@ -463,9 +463,7 @@ void sendUpdate()
     // --- Proceed with sending ---
     Serial.println("Serializing updated schedule...");
     String outputJson;
-    // Use serializeJsonPretty for easier debugging if needed, otherwise serializeJson
     serializeJson(scheduleDoc, outputJson);
-    // serializeJsonPretty(scheduleDoc, Serial); // Debug output
 
     Serial.print("Sending Update: ");
     Serial.println(outputJson.c_str());
@@ -476,21 +474,18 @@ void sendUpdate()
 
     Serial.println("Update sent successfully.");
 
-    // --- IMPORTANT: Decide what to do after successful send ---
-    // Option 1: Go idle, keep data (allows resending if requested again)
-    currentState = STATE_IDLE;
-    Serial.println("State changed to STATE_IDLE after sending.");
-
-    // Option 2: Go idle, clear data (requires new schedule)
-    // scheduleLoaded = false;
-    // scheduleDoc.clear();
-    // if (LittleFS.exists(SCHEDULE_FILENAME)) { // Also clear persisted file?
-    //     LittleFS.remove(SCHEDULE_FILENAME);
-    // }
-    // currentState = STATE_IDLE;
-    // Serial.println("State changed to STATE_IDLE and schedule cleared after sending.");
-
-    // Let's stick with Option 1 (keep data) for now.
+    // --- MODIFIED State Change Logic ---
+    if (changeStateToIdleOnSuccess)
+    {
+        currentState = STATE_IDLE;
+        Serial.println("State changed to STATE_IDLE after sending final update.");
+    }
+    else
+    {
+        // If called for an intermediate update, just log it and DO NOT change state.
+        Serial.println("Intermediate update sent. State remains unchanged.");
+    }
+    // --- End MODIFIED State Change Logic ---
 }
 
 // --- LittleFS Functions (Optional but Recommended) ---
