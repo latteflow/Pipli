@@ -169,6 +169,12 @@ void loop()
     digitalWrite(VIBRATION_PIN, LOW);
   }
 
+  // reset value on disconnection
+  if (!deviceConnected)
+  {
+    value = 0; // reset value if not connected
+  }
+
   // notify changed value
   if (deviceConnected)
   {
@@ -190,6 +196,7 @@ void loop()
     value++;
     delay(2000); // bluetooth stack will go into congestion, if too many packets are sent, in 6 hours test i was able to go as low as 3ms
   }
+
   // disconnecting
   if (!deviceConnected && oldDeviceConnected)
   {
