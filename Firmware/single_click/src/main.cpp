@@ -39,10 +39,14 @@ bool oldDeviceConnected = false;
 #define VIBRATION_PIN 19
 #define PAIR_PIN 23
 #define USER_PIN 34
-#define MTU 200 // Maximum Transmission Unit
+#define LED 2
+
+#define MTU 200              // Maximum Transmission Unit
+#define BLINK_DURATION_MS 50 // How long the LED stays on during a blink
 
 int value = 0;
 
+// Stream opearator
 template <class T>
 inline Print &operator<<(Print &obj, T arg)
 {
@@ -54,6 +58,15 @@ inline Print &operator<<(Print &obj, float arg)
 {
   obj.print(arg, 4);
   return obj;
+}
+
+// It preserves the original LED state if it was meant to be ON (connected)
+void blinkLed()
+{
+  bool originalState = digitalRead(LED); // Read current state (might be HIGH if connected)
+  digitalWrite(LED, !originalState);     // Toggle LED ON (if off) or OFF (if on) briefly
+  delay(BLINK_DURATION_MS);
+  digitalWrite(LED, originalState); // Restore original state
 }
 
 class MyServerCallbacks : public BLEServerCallbacks
@@ -84,6 +97,8 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
       {
         Serial.print(rxValue[i]);
       }
+      Serial.println();
+      blinkLed();
     }
   }
 };
@@ -95,6 +110,9 @@ void setup()
   pinMode(VIBRATION_PIN, OUTPUT);
   pinMode(PAIR_PIN, INPUT);
   pinMode(USER_PIN, INPUT);
+
+  pinMode(LED, OUTPUT);   // Built-in LED
+  digitalWrite(LED, LOW); // Ensure LED is off initially
 
   // Create the BLE Device
   BLEDevice::init("Pipli");
@@ -154,6 +172,7 @@ void loop()
   // notify changed value
   if (deviceConnected)
   {
+
     String str = "Hello from Pipli!" + String(value); // String to send
     int str_len = str.length() + 1;
 
@@ -165,12 +184,17 @@ void loop()
     pCharacteristic->setValue(char_array); // to send a test message
 
     pCharacteristic->notify(); // send the value to the app!
+
+    blinkLed();
+
     value++;
     delay(2000); // bluetooth stack will go into congestion, if too many packets are sent, in 6 hours test i was able to go as low as 3ms
   }
   // disconnecting
   if (!deviceConnected && oldDeviceConnected)
   {
+    // Set buildin LED to indicate disconnection
+    digitalWrite(LED, LOW);
     delay(500);                  // give the bluetooth stack the chance to get things ready
     pServer->startAdvertising(); // restart advertising
     Serial.println("start advertising");
@@ -181,5 +205,8 @@ void loop()
   {
     // do stuff here on connecting
     oldDeviceConnected = deviceConnected;
+
+    // Set buildin LED to indicate connection
+    digitalWrite(LED, HIGH);
   }
 }
