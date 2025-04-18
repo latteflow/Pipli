@@ -11,15 +11,15 @@ import {
     Device,
 } from "react-native-ble-plx";
 
-const DATA_SERVICE_UUID = "19b10000-e8f2-537e-4f6c-d104768a1214";
-const COLOR_CHARACTERISTIC_UUID = "19b10001-e8f2-537e-4f6c-d104768a1217";
+const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
 const bleManager = new BleManager();
 
 function useBLE() {
     const [allDevices, setAllDevices] = useState<Device[]>([]);
     const [connectedDevice, setConnectedDevice] = useState<Device | null>(null);
-    const [color, setColor] = useState("white");
+    const [value, setValue] = useState(" ");
 
     const requestAndroid31Permissions = async () => {
         const bluetoothScanPermission = await PermissionsAndroid.request(
@@ -98,10 +98,9 @@ function useBLE() {
             if (error) {
                 console.log(error);
             }
-
             if (
                 device &&
-                (device.localName === "Arduino" || device.name === "Arduino")
+                (device.localName === "Pipli" || device.name === "Pipli")
             ) {
                 setAllDevices((prevState: Device[]) => {
                     if (!isDuplicteDevice(prevState, device)) {
@@ -124,25 +123,17 @@ function useBLE() {
             return;
         }
 
-        const colorCode = base64.decode(characteristic.value);
+        const value = base64.decode(characteristic.value);
+        console.log("Data Received: ", value);
 
-        let color = "white";
-        if (colorCode === "B") {
-            color = "blue";
-        } else if (colorCode === "R") {
-            color = "red";
-        } else if (colorCode === "G") {
-            color = "green";
-        }
-
-        setColor(color);
+        setValue(value);
     };
 
     const startStreamingData = async (device: Device) => {
         if (device) {
             device.monitorCharacteristicForService(
-                DATA_SERVICE_UUID,
-                COLOR_CHARACTERISTIC_UUID,
+                SERVICE_UUID,
+                CHARACTERISTIC_UUID,
                 onDataUpdate
             );
         } else {
@@ -154,7 +145,7 @@ function useBLE() {
         connectToDevice,
         allDevices,
         connectedDevice,
-        color,
+        value,
         requestPermissions,
         scanForPeripherals,
         startStreamingData,

@@ -1,5 +1,14 @@
 # Welcome to your Expo app 👋
 
+## To start app in android 
+run 
+```
+bun android
+```
+
+Peripheral Device BLE Mac Address: 
+D8:BC:38:E5:30:46
+
 
 React Native: 
 https://reactnative.dev/docs/environment-setup

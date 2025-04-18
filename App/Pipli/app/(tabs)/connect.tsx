@@ -14,7 +14,7 @@ const App = () => {
         allDevices,
         connectedDevice,
         connectToDevice,
-        color,
+        value,
         requestPermissions,
         scanForPeripherals,
     } = useBLE();
@@ -37,15 +37,21 @@ const App = () => {
     };
 
     return (
-        <SafeAreaView style={[styles.container, { backgroundColor: color }]}>
+        <SafeAreaView style={[styles.container, { backgroundColor: "white" }]}>
             <View style={styles.heartRateTitleWrapper}>
                 {connectedDevice ? (
                     <>
                         <Text style={styles.heartRateTitleText}>Connected</Text>
+                        <Text style={styles.heartRateText}>
+                            {connectedDevice.name ?? connectedDevice.localName}
+                        </Text>
+                        <Text style={styles.heartRateText}>
+                            {value ? `Value: ${value}` : "No Data"}
+                        </Text>
                     </>
                 ) : (
                     <Text style={styles.heartRateTitleText}>
-                        Please connect the Arduino
+                        Please connect the device
                     </Text>
                 )}
             </View>
