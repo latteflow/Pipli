@@ -12,7 +12,7 @@ import {
     ScrollView, // Import ScrollView for better layout if content grows
 } from "react-native";
 import DeviceModal from "@/components/DeviceConnectionModal"; // Assuming path is correct
-import useBLE from "@/hooks/useBle"; // Assuming path is correct
+import { useBleContext } from "@/context/BleContext"; // Import the context hook
 
 const ConnectScreen = () => {
     // Destructure all functions and state from the hook
@@ -25,7 +25,7 @@ const ConnectScreen = () => {
         allDevices,
         connectedDevice, // Watch this
         value,
-    } = useBLE();
+    } = useBleContext();
 
     const [isModalVisible, setIsModalVisible] = useState<boolean>(false); // Watch this
     const [dataToSend, setDataToSend] = useState<string>("");

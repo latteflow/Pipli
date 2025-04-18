@@ -20,29 +20,41 @@ import { ThemedView } from '@/components/ThemedView';
 import { Profile, Medication, RelationToFood, PROFILES_STORAGE_KEY } from '@/types/pipli'; // Updated import
 // Assuming IconSymbol is correctly set up for these icons
 // import { IconSymbol } from '@/components/ui/IconSymbol';
+import { useBleContext } from '@/context/BleContext'; // Import the context hook
+
 
 // Helper to ensure medication has all fields (for loading old data)
 const ensureMedicationDefaults = (med: Partial<Medication>): Medication => ({
-    id: med.id || Date.now().toString() + Math.random().toString(36).substring(2, 7), // Ensure unique ID
+    id: med.id || Date.now().toString() + Math.random().toString(36).substring(2, 7),
     name: med.name || 'Unknown',
-    dose: med.dose || '', // Default empty
-    timeOfDay: med.timeOfDay || '', // Default empty
-    relationToFood: med.relationToFood || 'any', // Default 'any'
-    notes: med.notes || '', // Default empty string
+    dose: med.dose || '',
+    // Ensure 'times' is an array, default to empty if missing or not array
+    times: Array.isArray(med.times) ? med.times : [],
+    // Ensure 'durationDays' is a positive number, default to 1
+    durationDays: typeof med.durationDays === 'number' && med.durationDays > 0 ? med.durationDays : 1,
+    relationToFood: med.relationToFood || 'any',
+    notes: med.notes || '',
 });
+
+
 
 export default function ProfileDetailScreen() {
     const { id } = useLocalSearchParams<{ id: string }>();
     const router = useRouter();
+    const { connectedDevice, sendData } = useBleContext(); // Get BLE functions/state from context
 
     const [profile, setProfile] = useState<Profile | null>(null);
     const [allProfiles, setAllProfiles] = useState<Profile[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const [isSendingSchedule, setIsSendingSchedule] = useState(false); // Loading state for sending schedule
 
     // --- State for NEW medication inputs ---
     const [newMedName, setNewMedName] = useState('');
     const [newMedDose, setNewMedDose] = useState('');
-    const [newMedTimeOfDay, setNewMedTimeOfDay] = useState('');
+    // REMOVED: const [newMedTimeOfDay, setNewMedTimeOfDay] = useState('');
+    const [newMedTimes, setNewMedTimes] = useState<string[]>([]); // Array to hold multiple times
+    const [currentTimeInput, setCurrentTimeInput] = useState(''); // Input for adding a single time
+    const [newMedDurationDays, setNewMedDurationDays] = useState<string>('1'); // Duration input (string)
     const [newMedRelationToFood, setNewMedRelationToFood] = useState<RelationToFood>('any');
     const [newMedNotes, setNewMedNotes] = useState('');
     // ---
@@ -62,7 +74,6 @@ export default function ProfileDetailScreen() {
                 const storedProfiles = await AsyncStorage.getItem(PROFILES_STORAGE_KEY);
                 if (storedProfiles !== null) {
                     const parsedProfiles: Profile[] = JSON.parse(storedProfiles);
-                    // Ensure profiles AND their medications have all fields
                     const validatedProfiles = parsedProfiles.map(p => ({
                         ...p,
                         currentMedications: (p.currentMedications || []).map(ensureMedicationDefaults),
@@ -72,7 +83,6 @@ export default function ProfileDetailScreen() {
                     const foundProfile = validatedProfiles.find(p => p.id === id);
                     if (foundProfile) {
                         setProfile(foundProfile);
-                        console.log('Profile found:', foundProfile);
                     } else {
                         console.error(`Profile with ID ${id} not found.`);
                         Alert.alert("Error", "Profile not found.");
@@ -91,7 +101,6 @@ export default function ProfileDetailScreen() {
                 setIsLoading(false);
             }
         };
-
         loadProfileData();
     }, [id, router]); // Add router to dependency array
 
@@ -114,19 +123,50 @@ export default function ProfileDetailScreen() {
     const resetNewMedForm = () => {
         setNewMedName('');
         setNewMedDose('');
-        setNewMedTimeOfDay('');
+        setNewMedTimes([]); // Reset times array
+        setCurrentTimeInput(''); // Reset current time input
+        setNewMedDurationDays('1'); // Reset duration
         setNewMedRelationToFood('any');
         setNewMedNotes('');
     };
 
-    // --- Add Medication Handler ---
+    const handleAddTimeToList = () => {
+        const timeToAdd = currentTimeInput.trim();
+        if (!timeToAdd) {
+            Alert.alert("Invalid Time", "Please enter a time to add.");
+            return;
+        }
+        // Optional: Basic format check or prevent duplicates
+        if (newMedTimes.includes(timeToAdd)) {
+            Alert.alert("Duplicate Time", "This time has already been added.");
+            return;
+        }
+        setNewMedTimes([...newMedTimes, timeToAdd]);
+        setCurrentTimeInput(''); // Clear the input field
+    };
+
+    // --- Remove Time from the list for the new medication ---
+    const handleRemoveTimeFromList = (timeToRemove: string) => {
+        setNewMedTimes(newMedTimes.filter(time => time !== timeToRemove));
+    };
+
+
+    // --- Add Medication Handler (Updated) ---
     const handleAddMedication = () => {
         const medName = newMedName.trim();
         const medDose = newMedDose.trim();
-        const medTime = newMedTimeOfDay.trim();
+        const durationString = newMedDurationDays.trim();
 
-        if (!medName || !medDose || !medTime || !profile) {
-            Alert.alert('Missing Information', 'Please enter medication name, dose, and time.');
+        // Validate required fields
+        if (!medName || !medDose || newMedTimes.length === 0 || !durationString || !profile) {
+            Alert.alert('Missing Information', 'Please enter name, dose, at least one time, and duration.');
+            return;
+        }
+
+        // Validate and parse duration
+        const durationNum = parseInt(durationString, 10);
+        if (isNaN(durationNum) || durationNum <= 0) {
+            Alert.alert('Invalid Duration', 'Please enter a valid number of days (greater than 0).');
             return;
         }
 
@@ -139,9 +179,10 @@ export default function ProfileDetailScreen() {
             id: Date.now().toString() + Math.random().toString(36).substring(2, 7),
             name: medName,
             dose: medDose,
-            timeOfDay: medTime,
+            times: newMedTimes, // Use the array of times
+            durationDays: durationNum, // Use the parsed number
             relationToFood: newMedRelationToFood,
-            notes: newMedNotes.trim() || undefined, // Store notes only if not empty
+            notes: newMedNotes.trim() || undefined,
         };
 
         const updatedProfile = {
@@ -151,7 +192,7 @@ export default function ProfileDetailScreen() {
 
         const updatedAllProfiles = allProfiles.map(p => p.id === id ? updatedProfile : p);
         saveAllProfiles(updatedAllProfiles);
-        resetNewMedForm(); // Clear the form
+        resetNewMedForm();
         Keyboard.dismiss();
     };
 
@@ -234,14 +275,19 @@ export default function ProfileDetailScreen() {
         );
     };
 
-    // --- Render Helper for Medication Item Display ---
+    // --- Render Helper for Medication Item Display (Updated) ---
     const renderMedicationDetails = (med: Medication) => (
         <View style={styles.medDetailsContainer}>
             <ThemedText style={styles.medDetailText}>
                 <ThemedText style={styles.medDetailLabel}>Dose:</ThemedText> {med.dose}
             </ThemedText>
+            {/* Display multiple times */}
             <ThemedText style={styles.medDetailText}>
-                <ThemedText style={styles.medDetailLabel}>Time:</ThemedText> {med.timeOfDay}
+                <ThemedText style={styles.medDetailLabel}>Times:</ThemedText> {med.times.join(', ')}
+            </ThemedText>
+            {/* Display duration */}
+            <ThemedText style={styles.medDetailText}>
+                <ThemedText style={styles.medDetailLabel}>Duration:</ThemedText> {med.durationDays} day{med.durationDays !== 1 ? 's' : ''}
             </ThemedText>
             <ThemedText style={styles.medDetailText}>
                 <ThemedText style={styles.medDetailLabel}>Food:</ThemedText> {med.relationToFood.charAt(0).toUpperCase() + med.relationToFood.slice(1)}
@@ -253,6 +299,44 @@ export default function ProfileDetailScreen() {
             )}
         </View>
     );
+
+    // --- NEW: Handler to Send Schedule ---
+    const handleSendSchedule = async () => {
+        if (!connectedDevice) {
+            Alert.alert("Not Connected", "Please connect to the Pipli device first via the 'Connect' tab.");
+            return;
+        }
+        if (!profile || !profile.currentMedications) {
+            Alert.alert("Error", "Profile data or medication list is not available.");
+            return;
+        }
+
+        // Prepare the data payload with new structure
+        const scheduleData = profile.currentMedications.map(med => ({
+            name: med.name,
+            dose: med.dose,
+            times: med.times, // Send the array
+            durationDays: med.durationDays, // Send the number
+            relationToFood: med.relationToFood,
+            notes: med.notes || "",
+        }));
+
+        // Convert to JSON string
+        const jsonPayload = JSON.stringify(scheduleData);
+
+        console.log(`[handleSendSchedule] Sending payload (${jsonPayload.length} bytes):`, jsonPayload);
+        setIsSendingSchedule(true);
+        try {
+            // Use the sendData function from the context
+            await sendData(jsonPayload);
+            Alert.alert("Success", "Medication schedule sent to the Pipli device.");
+        } catch (error: any) {
+            console.error("[handleSendSchedule] Failed to send schedule:", error);
+            Alert.alert("Send Error", `Failed to send schedule: ${error.message || 'Unknown error'}`);
+        } finally {
+            setIsSendingSchedule(false);
+        }
+    };
 
     // --- Main Render Logic ---
 
@@ -289,45 +373,57 @@ export default function ProfileDetailScreen() {
                     <ThemedText type="subtitle" style={styles.sectionHeader}>Add New Medication</ThemedText>
                     <View style={styles.inputGroup}>
                         <ThemedText style={styles.inputLabel}>Name:</ThemedText>
-                        <TextInput
-                            style={styles.textInput}
-                            placeholder="e.g., Paracetamol"
-                            value={newMedName}
-                            onChangeText={setNewMedName}
-                            placeholderTextColor="#aaa"
-                        />
+                        <TextInput style={styles.textInput} placeholder="e.g., Paracetamol" value={newMedName} onChangeText={setNewMedName} placeholderTextColor="#aaa" />
                     </View>
                     <View style={styles.inputGroup}>
                         <ThemedText style={styles.inputLabel}>Dose:</ThemedText>
-                        <TextInput
-                            style={styles.textInput}
-                            placeholder="e.g., 1 tablet, 500mg"
-                            value={newMedDose}
-                            onChangeText={setNewMedDose}
-                            placeholderTextColor="#aaa"
-                        />
+                        <TextInput style={styles.textInput} placeholder="e.g., 1 tablet, 500mg" value={newMedDose} onChangeText={setNewMedDose} placeholderTextColor="#aaa" />
                     </View>
                     <View style={styles.inputGroup}>
-                        <ThemedText style={styles.inputLabel}>Time:</ThemedText>
+                        <ThemedText style={styles.inputLabel}>Times to Take (add one by one):</ThemedText>
+                        <View style={styles.addTimeContainer}>
+                            <TextInput
+                                style={styles.timeInput}
+                                placeholder="e.g., 8:00 AM"
+                                value={currentTimeInput}
+                                onChangeText={setCurrentTimeInput}
+                                placeholderTextColor="#aaa"
+                            />
+                            <TouchableOpacity onPress={handleAddTimeToList} style={styles.addTimeButton}>
+                                <Text style={styles.addTimeButtonText}>Add Time</Text>
+                            </TouchableOpacity>
+                        </View>
+                        {/* Display Added Times */}
+                        {newMedTimes.length > 0 && (
+                            <View style={styles.addedTimesContainer}>
+                                {newMedTimes.map((time, index) => (
+                                    <View key={index} style={styles.addedTimeChip}>
+                                        <Text style={styles.addedTimeText}>{time}</Text>
+                                        <TouchableOpacity onPress={() => handleRemoveTimeFromList(time)} style={styles.removeTimeButton}>
+                                            {/* Use IconSymbol if available */}
+                                            <Text style={styles.removeTimeButtonText}>✕</Text>
+                                            {/* <IconSymbol name="xmark.circle.fill" size={16} color="#fff" /> */}
+                                        </TouchableOpacity>
+                                    </View>
+                                ))}
+                            </View>
+                        )}
+                    </View>
+                    <View style={styles.inputGroup}>
+                        <ThemedText style={styles.inputLabel}>Duration (Days):</ThemedText>
                         <TextInput
                             style={styles.textInput}
-                            placeholder="e.g., Morning, 8:00 AM"
-                            value={newMedTimeOfDay}
-                            onChangeText={setNewMedTimeOfDay}
+                            placeholder="e.g., 7"
+                            value={newMedDurationDays}
+                            onChangeText={setNewMedDurationDays}
                             placeholderTextColor="#aaa"
+                            keyboardType="number-pad" // Use number pad
                         />
                     </View>
                     {renderRelationToFoodSelector()}
                     <View style={styles.inputGroup}>
                         <ThemedText style={styles.inputLabel}>Notes (Optional):</ThemedText>
-                        <TextInput
-                            style={[styles.textInput, styles.notesInput]}
-                            placeholder="e.g., Take with plenty of water"
-                            value={newMedNotes}
-                            onChangeText={setNewMedNotes}
-                            placeholderTextColor="#aaa"
-                            multiline
-                        />
+                        <TextInput style={[styles.textInput, styles.notesInput]} placeholder="e.g., Take with plenty of water" value={newMedNotes} onChangeText={setNewMedNotes} placeholderTextColor="#aaa" multiline />
                     </View>
                     <TouchableOpacity onPress={handleAddMedication} style={styles.addMedButton}>
                         <ThemedText style={styles.addMedButtonText}>Add Medication</ThemedText>
@@ -337,9 +433,7 @@ export default function ProfileDetailScreen() {
                 {/* --- Current Medications List --- */}
                 <ThemedView style={styles.section}>
                     <ThemedText type="subtitle" style={styles.sectionHeader}>Current Medications</ThemedText>
-                    {profile.currentMedications.length === 0 ? (
-                        <ThemedText style={styles.noMedsText}>None</ThemedText>
-                    ) : (
+                    {profile.currentMedications.length === 0 ? (<ThemedText style={styles.noMedsText}>None</ThemedText>) : (
                         profile.currentMedications.map((med, index) => (
                             <View key={med.id} style={[styles.medCard, index > 0 && styles.medCardMargin]}>
                                 <ThemedText style={styles.medNameHeader}>{med.name}</ThemedText>
@@ -362,21 +456,45 @@ export default function ProfileDetailScreen() {
                 {/* --- Past Medications List --- */}
                 <ThemedView style={styles.section}>
                     <ThemedText type="subtitle" style={styles.sectionHeader}>Past Medications</ThemedText>
-                    {profile.pastMedications.length === 0 ? (
-                        <ThemedText style={styles.noMedsText}>None</ThemedText>
-                    ) : (
-                        profile.pastMedications.map((med, index) => (
-                            <View key={med.id} style={[styles.medCard, styles.pastMedCard, index > 0 && styles.medCardMargin]}>
-                                <ThemedText style={[styles.medNameHeader, styles.pastMedNameHeader]}>{med.name}</ThemedText>
-                                {renderMedicationDetails(med)}
-                                <View style={styles.medActions}>
-                                    <TouchableOpacity onPress={() => handleDeleteMedication(med.id, 'past')} style={styles.medActionButton}>
-                                        {/* <IconSymbol name="trash.fill" size={20} color="#FF3B30" /> */}
-                                        <ThemedText style={styles.medActionTextDelete}>Delete</ThemedText>
-                                    </TouchableOpacity>
+                    {profile.pastMedications.length === 0 ? (<ThemedText style={styles.noMedsText}>None</ThemedText>)
+                        : (
+                            profile.pastMedications.map((med, index) => (
+                                <View key={med.id} style={[styles.medCard, styles.pastMedCard, index > 0 && styles.medCardMargin]}>
+                                    <ThemedText style={[styles.medNameHeader, styles.pastMedNameHeader]}>{med.name}</ThemedText>
+                                    {renderMedicationDetails(med)}
+                                    <View style={styles.medActions}>
+                                        <TouchableOpacity onPress={() => handleDeleteMedication(med.id, 'past')} style={styles.medActionButton}>
+                                            {/* <IconSymbol name="trash.fill" size={20} color="#FF3B30" /> */}
+                                            <ThemedText style={styles.medActionTextDelete}>Delete</ThemedText>
+                                        </TouchableOpacity>
+                                    </View>
                                 </View>
-                            </View>
-                        ))
+                            ))
+                        )}
+                </ThemedView>
+
+                {/* --- NEW: Send Schedule Section --- */}
+                <ThemedView style={styles.section}>
+                    <ThemedText type="subtitle" style={styles.sectionHeader}>Sync with Device</ThemedText>
+                    <TouchableOpacity
+                        onPress={handleSendSchedule}
+                        style={[
+                            styles.syncButton,
+                            // Disable button if not connected or already sending
+                            (!connectedDevice || isSendingSchedule) && styles.syncButtonDisabled
+                        ]}
+                        disabled={!connectedDevice || isSendingSchedule}
+                    >
+                        {isSendingSchedule ? (
+                            <ActivityIndicator color="#fff" size="small" />
+                        ) : (
+                            <Text style={styles.syncButtonText}>
+                                {connectedDevice ? "Send Schedule to Pipli" : "Connect Device First"}
+                            </Text>
+                        )}
+                    </TouchableOpacity>
+                    {!connectedDevice && (
+                        <ThemedText style={styles.syncInfoText}>Go to the 'Connect' tab to connect your device.</ThemedText>
                     )}
                 </ThemedView>
 
@@ -390,6 +508,15 @@ const styles = StyleSheet.create({
     container: {
         flex: 1,
     },
+    // Input Styles
+    inputGroup: { marginBottom: 15, }, // Increased spacing
+    inputLabel: { fontSize: 15, fontWeight: '500', color: '#444', marginBottom: 6, },
+    textInput: {
+        height: 44, // Standard height
+        borderColor: '#ccc', borderWidth: 1, borderRadius: 8, // Slightly more rounded
+        paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 16, color: '#333',
+    },
+    notesInput: { height: 80, textAlignVertical: 'top', paddingTop: 10, },
     scrollContent: {
         padding: 15, // Use slightly less padding for scroll content
         paddingBottom: 40,
@@ -428,31 +555,6 @@ const styles = StyleSheet.create({
         borderBottomWidth: 1,
         borderBottomColor: '#eee',
         paddingBottom: 8,
-    },
-    // Input Styles
-    inputGroup: {
-        marginBottom: 12,
-    },
-    inputLabel: {
-        fontSize: 15,
-        fontWeight: '500',
-        color: '#444',
-        marginBottom: 5,
-    },
-    textInput: {
-        height: 42, // Slightly smaller height
-        borderColor: '#ccc',
-        borderWidth: 1,
-        borderRadius: 6,
-        paddingHorizontal: 12,
-        backgroundColor: '#fff',
-        fontSize: 16,
-        color: '#333',
-    },
-    notesInput: {
-        height: 80, // Taller for multiline
-        textAlignVertical: 'top', // Align text to top for multiline
-        paddingTop: 10,
     },
     // Relation to Food Selector
     relationSelector: {
@@ -565,4 +667,51 @@ const styles = StyleSheet.create({
         fontSize: 14,
         fontWeight: '500',
     },
+    syncButton: {
+        backgroundColor: '#FF9500', // Orange color for sync action
+        paddingVertical: 14,
+        paddingHorizontal: 20,
+        borderRadius: 8,
+        alignItems: 'center',
+        marginTop: 10,
+    },
+    syncButtonDisabled: {
+        backgroundColor: '#aaa', // Grey out when disabled
+    },
+    syncButtonText: {
+        color: 'white',
+        fontSize: 16,
+        fontWeight: 'bold',
+    },
+    syncInfoText: {
+        textAlign: 'center',
+        marginTop: 10,
+        fontSize: 14,
+        color: '#666',
+    },
+    addTimeContainer: { flexDirection: 'row', alignItems: 'center', gap: 8, },
+    timeInput: {
+        flex: 1, // Take available space
+        height: 44, borderColor: '#ccc', borderWidth: 1, borderRadius: 8,
+        paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 16, color: '#333',
+    },
+    addTimeButton: {
+        backgroundColor: '#5ac8fa', // Light blue for adding time
+        paddingVertical: 11, // Match input height roughly
+        paddingHorizontal: 15, borderRadius: 8,
+    },
+    addTimeButtonText: { color: 'white', fontSize: 14, fontWeight: 'bold', },
+    addedTimesContainer: {
+        flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10,
+    },
+    addedTimeChip: {
+        flexDirection: 'row', alignItems: 'center', backgroundColor: '#e0e0e0',
+        borderRadius: 15, paddingVertical: 5, paddingLeft: 10, paddingRight: 5,
+    },
+    addedTimeText: { fontSize: 14, color: '#333', marginRight: 5, },
+    removeTimeButton: {
+        backgroundColor: '#a0a0a0', borderRadius: 10, width: 20, height: 20,
+        justifyContent: 'center', alignItems: 'center',
+    },
+    removeTimeButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 12, lineHeight: 18, },
 });
