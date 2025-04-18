@@ -63,7 +63,7 @@ int currentMedIndex = -1;
 int currentTimeIndex = -1;
 unsigned long stateTimer = 0; // Used for vibration duration and response timeout
 
-// --- Function Prototypes ---
+// -- -Function Prototypes-- -
 void blinkLed();
 void startVibration();
 void stopVibration();
@@ -71,7 +71,7 @@ bool loadSchedule();
 bool saveSchedule();
 void processSchedule();
 void sendUpdate();
-void moveToNextReminder();
+// void moveToNextReminder(); // No longer needed
 void handleReceivedData(const std::string &data);
 
 // Stream opearator (kept from original)
@@ -260,8 +260,9 @@ void handleReceivedData(const std::string &data)
 
     scheduleLoaded = true;
     scheduleReceiveTime = millis();
-    currentMedIndex = 0;
-    currentTimeIndex = 0;
+    // Reset indices - processSchedule will find the first one
+    currentMedIndex = -1;
+    currentTimeIndex = -1;
     currentState = STATE_PROCESSING_SCHEDULE;
     Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
 
@@ -273,7 +274,8 @@ void handleReceivedData(const std::string &data)
     }
 }
 
-// Find the next reminder time and check if it's due
+// --- MODIFIED processSchedule ---
+// Scans the entire schedule to find the earliest *absolute* time for the next reminder
 void processSchedule()
 {
     if (!scheduleLoaded || scheduleDoc.isNull() || !scheduleDoc.is<JsonArray>())
@@ -283,15 +285,89 @@ void processSchedule()
     }
 
     JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    unsigned long currentTimeMillis = millis();
 
-    // Check if we've processed all medications
-    if (currentMedIndex >= scheduleArray.size())
+    // Variables to track the earliest due reminder found in this scan
+    unsigned long earliestDueTimeFound = 0; // Use 0 as initial, check if set later
+    int earliestMedIndexFound = -1;
+    int earliestTimeIndexFound = -1;
+    bool reminderFound = false; // Flag if we found *any* unprocessed reminder
+
+    // Scan ALL medications and ALL times
+    for (int medIdx = 0; medIdx < scheduleArray.size(); ++medIdx)
     {
-        Serial.println("All medications processed.");
+        JsonObject currentMed = scheduleArray[medIdx];
+        // Basic validation for the medication entry
+        if (!currentMed || !currentMed.containsKey("times") || !currentMed["times"].is<JsonArray>())
+        {
+            // Serial.printf("Skipping invalid med entry at index %d\n", medIdx); // Optional debug
+            continue; // Skip to next medication
+        }
 
-        // --- Modification ---
-        // If connected, attempt to send immediately.
-        // If not connected, just go idle. Data is saved and update is pending.
+        JsonArray timesArray = currentMed["times"].as<JsonArray>();
+        for (int timeIdx = 0; timeIdx < timesArray.size(); ++timeIdx)
+        {
+            JsonObject timeObj = timesArray[timeIdx];
+            // Basic validation for the time entry
+            if (!timeObj || !timeObj.containsKey("time") || !timeObj.containsKey("responded"))
+            {
+                // Serial.printf("Skipping invalid time entry at med %d, time %d\n", medIdx, timeIdx); // Optional debug
+                continue; // Skip to next time
+            }
+
+            // Check if this reminder needs processing (responded is null)
+            if (timeObj["responded"].isNull())
+            {
+                // Calculate its absolute due time
+                long reminderOffsetSeconds = timeObj["time"].as<String>().toInt();
+                unsigned long reminderDueTimeMillis = scheduleReceiveTime + (reminderOffsetSeconds * 1000UL);
+
+                // Compare with the earliest found so far
+                if (!reminderFound || reminderDueTimeMillis < earliestDueTimeFound)
+                {
+                    earliestDueTimeFound = reminderDueTimeMillis;
+                    earliestMedIndexFound = medIdx;
+                    earliestTimeIndexFound = timeIdx;
+                    reminderFound = true; // Mark that we found at least one
+                }
+            }
+        } // End loop times
+    } // End loop medications
+
+    // --- After scanning everything ---
+
+    if (reminderFound)
+    {
+        // We found at least one unprocessed reminder. Check if the earliest one is due.
+        // Serial.printf("Earliest reminder found: Med %d, Time %d, Due: %lu, Now: %lu\n", // Debug
+        //               earliestMedIndexFound, earliestTimeIndexFound, earliestDueTimeFound, currentTimeMillis);
+
+        if (currentTimeMillis >= earliestDueTimeFound)
+        {
+            // It's time! Set the global indices for the active reminder
+            currentMedIndex = earliestMedIndexFound;
+            currentTimeIndex = earliestTimeIndexFound;
+
+            // Get details for logging
+            JsonObject med = scheduleArray[currentMedIndex];
+            JsonObject time = med["times"].as<JsonArray>()[currentTimeIndex];
+
+            Serial.printf("Reminder Due! Med ID: %s, Time Offset: %s (Indices: M%d, T%d)\n",
+                          med["med_id"].as<const char *>(),
+                          time["time"].as<const char *>(),
+                          currentMedIndex, currentTimeIndex);
+
+            startVibration();
+            stateTimer = millis(); // Start timer for vibration duration
+            currentState = STATE_VIBRATING;
+            Serial.println("State changed to STATE_VIBRATING");
+        }
+        // Else: An unprocessed reminder exists, but it's not time yet. Stay in PROCESSING state.
+    }
+    else
+    {
+        // No unprocessed reminders were found in the entire schedule.
+        Serial.println("All medications processed.");
         if (deviceConnected)
         {
             currentState = STATE_SENDING_UPDATE;
@@ -302,118 +378,49 @@ void processSchedule()
             currentState = STATE_IDLE;
             Serial.println("Processing complete while disconnected. Update pending. State changed to STATE_IDLE.");
         }
-        // --- End Modification ---
-        return;
     }
-
-    JsonObject currentMed = scheduleArray[currentMedIndex];
-    if (!currentMed || !currentMed.containsKey("times") || !currentMed["times"].is<JsonArray>())
-    {
-        Serial.println("Invalid medication entry or missing times. Skipping.");
-        moveToNextReminder(); // Skip to next med/time
-        return;
-    }
-
-    JsonArray timesArray = currentMed["times"].as<JsonArray>();
-
-    // Check if we've processed all times for this medication
-    if (currentTimeIndex >= timesArray.size())
-    {
-        Serial.printf("Finished times for med_id %s. Moving to next med.\n", currentMed["med_id"].as<const char *>());
-        currentMedIndex++;
-        currentTimeIndex = 0;
-        // Re-run processSchedule to check the next med immediately
-        // or wait for the next loop iteration
-        return; // Let the next loop iteration handle the next med index check
-    }
-
-    JsonObject timeObj = timesArray[currentTimeIndex];
-    if (!timeObj || !timeObj.containsKey("time") || !timeObj.containsKey("responded"))
-    {
-        Serial.println("Invalid time object. Skipping.");
-        moveToNextReminder();
-        return;
-    }
-
-    // Check if this reminder has already been processed (responded is not null)
-    if (!timeObj["responded"].isNull())
-    {
-        // Serial.println("Reminder already processed. Skipping.");
-        moveToNextReminder();
-        return;
-    }
-
-    // --- Calculate Time ---
-    // Assuming "time" is a string representing offset in SECONDS
-    long reminderOffsetSeconds = timeObj["time"].as<String>().toInt();
-    unsigned long reminderDueTimeMillis = scheduleReceiveTime + (reminderOffsetSeconds * 1000UL);
-    unsigned long currentTimeMillis = millis();
-
-    // Serial.printf("Checking Med %d, Time %d: Due at %lu ms, Current %lu ms\n",
-    //               currentMedIndex, currentTimeIndex, reminderDueTimeMillis, currentTimeMillis);
-
-    if (currentTimeMillis >= reminderDueTimeMillis)
-    {
-        Serial.printf("Reminder Due! Med ID: %s, Time Offset: %s\n",
-                      currentMed["med_id"].as<const char *>(),
-                      timeObj["time"].as<const char *>());
-
-        startVibration();
-        stateTimer = millis(); // Start timer for vibration duration
-        currentState = STATE_VIBRATING;
-        Serial.println("State changed to STATE_VIBRATING");
-    }
-    // Else: Not time yet, keep checking in the next loop iteration
 }
 
-void moveToNextReminder()
-{
-    if (!scheduleLoaded || !scheduleDoc.is<JsonArray>())
-        return;
-    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
-    if (currentMedIndex < 0 || currentMedIndex >= scheduleArray.size())
-        return; // Invalid state
-
-    JsonObject currentMed = scheduleArray[currentMedIndex];
-    if (!currentMed || !currentMed.containsKey("times") || !currentMed["times"].is<JsonArray>())
-    {
-        // Invalid med, try next one
-        currentMedIndex++;
-        currentTimeIndex = 0;
-        return;
-    }
-
-    JsonArray timesArray = currentMed["times"].as<JsonArray>();
-    currentTimeIndex++; // Move to next time slot
-
-    if (currentTimeIndex >= timesArray.size())
-    {
-        // Finished times for this med, move to next med
-        currentMedIndex++;
-        currentTimeIndex = 0; // Reset time index for the new med
-    }
-    // State remains STATE_PROCESSING_SCHEDULE to check the next one
-}
-
+// --- MODIFIED recordResponse ---
 void recordResponse(bool responded)
 {
-    if (!scheduleLoaded || !scheduleDoc.is<JsonArray>() || currentMedIndex < 0 || currentTimeIndex < 0)
+    // Check if indices are valid (should be set by processSchedule before VIBRATING state)
+    if (!scheduleLoaded || scheduleDoc.isNull() || !scheduleDoc.is<JsonArray>() || currentMedIndex < 0 || currentTimeIndex < 0)
     {
         Serial.println("Error: Cannot record response, schedule not loaded or indices invalid.");
+        currentState = STATE_IDLE; // Go idle to prevent issues
         return;
     }
+
     JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    // Bounds check just in case
     if (currentMedIndex >= scheduleArray.size())
+    {
+        Serial.println("Error: currentMedIndex out of bounds in recordResponse.");
+        currentState = STATE_IDLE;
         return;
+    }
     JsonObject currentMed = scheduleArray[currentMedIndex];
     if (!currentMed || !currentMed.containsKey("times") || !currentMed["times"].is<JsonArray>())
+    {
+        Serial.println("Error: Invalid med object in recordResponse.");
+        currentState = STATE_IDLE;
         return;
+    }
     JsonArray timesArray = currentMed["times"].as<JsonArray>();
     if (currentTimeIndex >= timesArray.size())
+    {
+        Serial.println("Error: currentTimeIndex out of bounds in recordResponse.");
+        currentState = STATE_IDLE;
         return;
+    }
     JsonObject timeObj = timesArray[currentTimeIndex];
     if (!timeObj)
+    {
+        Serial.println("Error: Invalid time object in recordResponse.");
+        currentState = STATE_IDLE;
         return;
+    }
 
     Serial.printf("Recording response for Med %d, Time %d: %s\n", currentMedIndex, currentTimeIndex, responded ? "Yes" : "No");
     timeObj["responded"] = responded;
@@ -421,9 +428,15 @@ void recordResponse(bool responded)
     // Save the updated schedule after recording response
     saveSchedule();
 
-    // Move to the next reminder check
-    moveToNextReminder();
-    currentState = STATE_PROCESSING_SCHEDULE; // Go back to checking times
+    // --- No longer move to next reminder explicitly ---
+    // moveToNextReminder();
+
+    // Reset active indices
+    // currentMedIndex = -1; // Optional: Reset, but processSchedule will overwrite anyway
+    // currentTimeIndex = -1;
+
+    // Go back to processing state to find the *next* earliest reminder
+    currentState = STATE_PROCESSING_SCHEDULE;
     Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
 }
 
@@ -527,7 +540,6 @@ bool saveSchedule()
         return false;
     }
 }
-
 bool loadSchedule()
 {
     if (!LittleFS.exists(SCHEDULE_FILENAME))
@@ -543,7 +555,6 @@ bool loadSchedule()
         return false;
     }
 
-    // Clear existing data before loading
     scheduleDoc.clear();
     DeserializationError error = deserializeJson(scheduleDoc, file);
     file.close();
@@ -552,8 +563,6 @@ bool loadSchedule()
     {
         Serial.print(F("Failed to parse schedule file: "));
         Serial.println(error.f_str());
-        // Delete corrupted file?
-        // LittleFS.remove(SCHEDULE_FILENAME);
         return false;
     }
 
@@ -566,9 +575,9 @@ bool loadSchedule()
     Serial.println("Schedule loaded successfully from LittleFS.");
     scheduleLoaded = true;
     scheduleReceiveTime = millis(); // Treat load time as the new reference
-    currentMedIndex = 0;            // Start processing from the beginning
-    currentTimeIndex = 0;
-    // Don't automatically start processing? Or should we? Let's start.
+    // Reset indices - processSchedule will find the first one
+    currentMedIndex = -1;
+    currentTimeIndex = -1;
     currentState = STATE_PROCESSING_SCHEDULE;
     Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
     return true;
