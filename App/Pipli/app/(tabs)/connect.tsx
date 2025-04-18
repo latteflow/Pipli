@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+
+import React, { useEffect, useState } from "react";
 import {
     SafeAreaView,
     StyleSheet,
@@ -10,8 +11,8 @@ import {
     ActivityIndicator, // Optional: for loading state
     ScrollView, // Import ScrollView for better layout if content grows
 } from "react-native";
-import DeviceModal from "@/components/DeviceConnectionModal";
-import useBLE from "@/hooks/useBle"; // Assuming your hook is correctly set up
+import DeviceModal from "@/components/DeviceConnectionModal"; // Assuming path is correct
+import useBLE from "@/hooks/useBle"; // Assuming path is correct
 
 const ConnectScreen = () => {
     // Destructure all functions and state from the hook
@@ -19,45 +20,100 @@ const ConnectScreen = () => {
         requestPermissions,
         scanForPeripherals,
         connectToDevice,
-        disconnectFromDevice, // Get disconnect function
-        sendData,             // Get sendData function
+        disconnectFromDevice,
+        sendData,
         allDevices,
-        connectedDevice,
-        value,                // Received value
+        connectedDevice, // Watch this
+        value,
     } = useBLE();
 
-    const [isModalVisible, setIsModalVisible] = useState<boolean>(false);
-    const [dataToSend, setDataToSend] = useState<string>(""); // State for input data
-    const [isSending, setIsSending] = useState<boolean>(false); // Optional: loading state
+    const [isModalVisible, setIsModalVisible] = useState<boolean>(false); // Watch this
+    const [dataToSend, setDataToSend] = useState<string>("");
+    const [isSending, setIsSending] = useState<boolean>(false);
 
-    const scanForDevices = async () => {
-        console.log("Requesting permissions...");
-        const isPermissionsEnabled = await requestPermissions();
+    // // --- useEffect to automatically close modal on disconnect ---
+    // useEffect(() => {
+    //     // If the modal is currently flagged as visible in state,
+    //     // but the device becomes disconnected (connectedDevice becomes null),
+    //     // then automatically hide the modal by updating the state.
+    //     if (isModalVisible && connectedDevice === null) {
+    //         console.log("[Effect] Device disconnected/null while modal visible. Hiding modal.");
+    //         setIsModalVisible(false);
+    //     }
+    // }, [connectedDevice, isModalVisible]); // Re-run this effect if connection status or modal visibility flag changes
+    // // --- End of useEffect ---
+
+
+    /**
+     * Requests permissions and initiates scanning.
+     * Returns true if permissions were granted, false otherwise.
+     */
+    const scanForDevices = async (): Promise<boolean> => {
+        console.log("[scanForDevices] Requesting permissions...");
+        let isPermissionsEnabled = false;
+        try {
+            isPermissionsEnabled = await requestPermissions();
+            console.log("[scanForDevices] Permissions result:", isPermissionsEnabled);
+        } catch (error) {
+            console.error("[scanForDevices] Error requesting permissions:", error);
+            Alert.alert("Permission Error", "Could not request permissions.");
+            return false; // Indicate failure
+        }
+
         if (isPermissionsEnabled) {
-            console.log("Permissions granted, starting scan...");
-            scanForPeripherals(); // Start scanning
+            console.log("[scanForDevices] Permissions granted, calling scanForPeripherals...");
+            try {
+                // Assuming scanForPeripherals handles its own errors internally
+                // and starts the scan asynchronously.
+                scanForPeripherals();
+                return true; // Indicate success (permissions granted, scan likely started)
+            } catch (error) {
+                // This catch might not be necessary if useBLE handles errors, but good practice
+                console.error("[scanForDevices] Error calling scanForPeripherals:", error);
+                Alert.alert("Scan Error", "Could not start scanning.");
+                return false; // Indicate failure
+            }
         } else {
-            console.log("Permissions denied.");
+            console.log("[scanForDevices] Permissions denied.");
             Alert.alert(
                 "Permission Denied",
                 "Cannot scan for devices without required permissions."
             );
+            return false; // Indicate failure
         }
     };
 
+    /**
+     * Explicitly hides the device selection modal.
+     */
     const hideModal = () => {
+        console.log("[hideModal] Hiding modal explicitly.");
         setIsModalVisible(false);
     };
 
+    /**
+     * Opens the device selection modal if not already connected.
+     * Initiates scanning only if needed.
+     */
     const openModal = async () => {
-        // Only scan and open modal if not already connected
+        console.log(`[openModal] Called. Current connectedDevice state:`, connectedDevice);
+
         if (!connectedDevice) {
-            await scanForDevices(); // Request permissions and scan
-            setIsModalVisible(true); // Open the modal to show devices
+            console.log("[openModal] Condition !connectedDevice is TRUE. Calling scanForDevices...");
+            const permissionsGranted = await scanForDevices(); // Request permissions and scan
+
+            if (permissionsGranted) {
+                console.log("[openModal] scanForDevices reported success (permissions granted). Setting modal visible.");
+                setIsModalVisible(true); // Open the modal ONLY if permissions were granted
+            } else {
+                console.log("[openModal] scanForDevices reported failure (permissions denied or error). Modal not opened.");
+                // Alert is already shown in scanForDevices if permissions denied
+            }
         } else {
+            console.log("[openModal] Condition !connectedDevice is FALSE. Showing 'Already Connected' alert.");
             Alert.alert(
                 "Already Connected",
-                `Connected to ${connectedDevice.name ?? connectedDevice.id}`
+                `Connected to ${connectedDevice.name ?? connectedDevice.localName ?? connectedDevice.id}`
             );
         }
     };
@@ -75,13 +131,13 @@ const ConnectScreen = () => {
 
         setIsSending(true); // Show loading indicator
         try {
-            console.log(`Attempting to send data: ${dataToSend}`);
+            console.log(`[handleSendData] Attempting to send data: ${dataToSend}`);
             await sendData(dataToSend); // Call the hook's sendData function
-            console.log("Data send successful (from UI).");
+            console.log("[handleSendData] Data send successful (from UI).");
             Alert.alert("Success", "Data sent!");
             setDataToSend(""); // Clear input after sending
         } catch (error: any) {
-            console.error("Send Data UI Error:", error);
+            console.error("[handleSendData] Send Data UI Error:", error);
             Alert.alert(
                 "Send Error",
                 `Failed to send data: ${error.message || "Unknown error"}`
@@ -94,21 +150,21 @@ const ConnectScreen = () => {
     // --- Handler for disconnecting ---
     const handleDisconnect = async () => {
         if (connectedDevice) {
-            console.log("Attempting to disconnect...");
+            console.log("[handleDisconnect] Attempting to disconnect...");
             try {
                 await disconnectFromDevice(); // Call the hook's disconnect function
-                console.log("Disconnected successfully (from UI).");
+                console.log("[handleDisconnect] Disconnected successfully (from UI).");
                 Alert.alert("Disconnected", "Device has been disconnected.");
-                // Reset send input as well
-                setDataToSend("");
+                setDataToSend(""); // Reset send input as well
             } catch (error: any) {
-                console.error("Disconnect UI Error:", error);
+                console.error("[handleDisconnect] Disconnect UI Error:", error);
                 Alert.alert(
                     "Disconnect Error",
                     `Failed to disconnect: ${error.message || "Unknown error"}`
                 );
             }
         } else {
+            console.log("[handleDisconnect] No device connected to disconnect.");
             Alert.alert("Error", "No device is currently connected.");
         }
     };
@@ -152,7 +208,6 @@ const ConnectScreen = () => {
                                     )}
                                 </TouchableOpacity>
                             </View>
-                            {/* --- --- --- --- --- */}
 
                             {/* --- Disconnect Button --- */}
                             <View style={styles.actionSection}>
@@ -163,7 +218,6 @@ const ConnectScreen = () => {
                                     <Text style={styles.ctaButtonText}>Disconnect</Text>
                                 </TouchableOpacity>
                             </View>
-                            {/* --- --- --- --- --- */}
                         </>
                     ) : (
                         // --- Disconnected State UI ---
@@ -182,10 +236,11 @@ const ConnectScreen = () => {
                 </View>
             </ScrollView>
 
-            {/* Device Selection Modal (Only shown when isModalVisible is true) */}
+            {/* Device Selection Modal */}
             <DeviceModal
-                closeModal={hideModal}
-                visible={isModalVisible && !connectedDevice} // Show only if modal state is true AND not connected
+                closeModal={hideModal} // Pass the function to explicitly close
+                // Show modal only if the state flag is true AND we are not connected
+                visible={isModalVisible && !connectedDevice}
                 connectToPeripheral={connectToDevice}
                 devices={allDevices}
             />
