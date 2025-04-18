@@ -39,6 +39,8 @@ bool oldDeviceConnected = false;
 #define VIBRATION_DURATION_MS 2000 // How long to vibrate for a reminder
 #define RESPONSE_TIMEOUT_MS 15000  // How long to wait for user input after vibration
 
+#define UPDATE_REQUEST_CMD "SEND_UPDATE"
+
 // --- State Machine ---
 enum State
 {
@@ -143,8 +145,21 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
             Serial.println(rxValue.c_str());
             blinkLed(); // Blink on any receive
 
-            // Handle the received data (expecting schedule JSON)
-            handleReceivedData(rxValue);
+            // --- Modification: Check for command first ---
+            if (rxValue == UPDATE_REQUEST_CMD)
+            {
+                Serial.println("Received update request command.");
+                // Attempt to send the update immediately if connected
+                // sendUpdate() already checks for connection and loaded data
+                sendUpdate();
+            }
+            else
+            {
+                // If it's not the command, assume it's a new schedule
+                Serial.println("Data is not an update command, treating as new schedule.");
+                handleReceivedData(rxValue);
+            }
+            // --- End Modification ---
         }
     }
 };
@@ -155,7 +170,7 @@ void handleReceivedData(const std::string &data)
 {
     Serial.println("Attempting to parse schedule...");
     // Clear previous schedule data
-    scheduleDoc.clear();
+    scheduleDoc.clear(); // Make sure you are using DynamicJsonDocument or have allocated enough static memory
     DeserializationError error = deserializeJson(scheduleDoc, data);
 
     if (error)
@@ -163,11 +178,10 @@ void handleReceivedData(const std::string &data)
         Serial.print(F("deserializeJson() failed: "));
         Serial.println(error.f_str());
         scheduleLoaded = false;
-        currentState = STATE_IDLE; // Go back to idle if parsing failed
+        currentState = STATE_IDLE;
         return;
     }
 
-    // Check if it's an array (basic validation)
     if (!scheduleDoc.is<JsonArray>())
     {
         Serial.println("Error: Received JSON is not an array.");
@@ -176,48 +190,87 @@ void handleReceivedData(const std::string &data)
         return;
     }
 
-    // --- IMPORTANT: Modify the structure to store responses ---
-    // Iterate through the received schedule and transform the 'times' array
     JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    bool structureUpdateSuccess = true; // Flag to track success
+
     for (JsonObject med : scheduleArray)
     {
         if (med.containsKey("times") && med["times"].is<JsonArray>())
         {
+            // Temporarily store original time strings because we modify the object
+            std::vector<String> originalTimeStrings;
             JsonArray originalTimes = med["times"].as<JsonArray>();
-            JsonArray newTimesArray; // Create a new array for objects
-
             for (JsonVariant t : originalTimes)
             {
-                JsonObject timeObj = newTimesArray.createNestedObject();
-                // Assuming original times are strings representing seconds offset
-                timeObj["time"] = t.as<String>();
-                timeObj["responded"] = false; // Initialize response as null (or false)
+                originalTimeStrings.push_back(t.as<String>());
             }
-            // Replace the original 'times' array with the new array of objects
-            med["times"] = newTimesArray;
+
+            // *** FIX: Create the new array directly nested within 'med' ***
+            // This ensures it uses scheduleDoc's memory pool.
+            // It implicitly removes/replaces the old "times" key.
+            JsonArray newTimesArray = med.createNestedArray("times");
+            if (newTimesArray.isNull())
+            {
+                Serial.println("Error: Failed to create nested times array. Memory full?");
+                structureUpdateSuccess = false;
+                break; // Exit the loop on memory error
+            }
+
+            // Populate the newly created nested array
+            for (const String &t_str : originalTimeStrings)
+            {
+                JsonObject timeObj = newTimesArray.createNestedObject();
+                if (timeObj.isNull())
+                {
+                    Serial.println("Error: Failed to create nested time object. Memory full?");
+                    structureUpdateSuccess = false;
+                    break; // Exit the inner loop
+                }
+                timeObj["time"] = t_str;
+                // Use JsonNull to clearly indicate "not yet responded" vs "responded false"
+                timeObj["responded"] = nullptr;
+            }
+            if (!structureUpdateSuccess)
+                break; // Exit outer loop if inner loop failed
         }
         else
         {
             Serial.println("Warning: Medication entry missing 'times' array or invalid format.");
-            // Optionally remove this invalid entry or handle it
+            // Decide if this is an error or just needs skipping
+            // structureUpdateSuccess = false; // Uncomment if this should halt processing
+            // break;
         }
+    } // End for loop iterating through medications
+
+    if (!structureUpdateSuccess)
+    {
+        Serial.println("Failed to update schedule structure. Aborting.");
+        scheduleLoaded = false;
+        currentState = STATE_IDLE;
+        scheduleDoc.clear(); // Clear potentially corrupted document
+        return;
     }
 
     Serial.println("Schedule parsed and structure updated successfully.");
+
+    // --- Debug: Print the modified structure ---
+    Serial.println("--- Modified Structure ---");
+    serializeJsonPretty(scheduleDoc, Serial);
+    Serial.println("\n------------------------");
+
     scheduleLoaded = true;
-    scheduleReceiveTime = millis();           // Record time for relative reminders
-    currentMedIndex = 0;                      // Start from the first medication
-    currentTimeIndex = 0;                     // Start from the first time for that medication
-    currentState = STATE_PROCESSING_SCHEDULE; // Start processing
+    scheduleReceiveTime = millis();
+    currentMedIndex = 0;
+    currentTimeIndex = 0;
+    currentState = STATE_PROCESSING_SCHEDULE;
     Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
 
-    // Save the initial schedule with null responses (optional but good)
-    saveSchedule();
-
-    // Optional: Send confirmation back
-    // pCharacteristic->setValue("ACK_SCHEDULE_RECEIVED");
-    // pCharacteristic->notify();
-    // blinkLed();
+    // Save the initial schedule (now with correct structure)
+    if (!saveSchedule())
+    {
+        Serial.println("Error saving initial schedule!");
+        // Handle error? Maybe revert state?
+    }
 }
 
 // Find the next reminder time and check if it's due
@@ -235,8 +288,21 @@ void processSchedule()
     if (currentMedIndex >= scheduleArray.size())
     {
         Serial.println("All medications processed.");
-        // Optionally send update automatically here, or wait for request
-        currentState = STATE_SENDING_UPDATE; // Or STATE_IDLE
+
+        // --- Modification ---
+        // If connected, attempt to send immediately.
+        // If not connected, just go idle. Data is saved and update is pending.
+        if (deviceConnected)
+        {
+            currentState = STATE_SENDING_UPDATE;
+            Serial.println("Processing complete. State changed to STATE_SENDING_UPDATE.");
+        }
+        else
+        {
+            currentState = STATE_IDLE;
+            Serial.println("Processing complete while disconnected. Update pending. State changed to STATE_IDLE.");
+        }
+        // --- End Modification ---
         return;
     }
 
@@ -363,40 +429,55 @@ void recordResponse(bool responded)
 
 void sendUpdate()
 {
+    // --- Check connection FIRST ---
     if (!deviceConnected)
     {
-        Serial.println("Cannot send update: Device not connected.");
-        currentState = STATE_IDLE; // Or back to processing if schedule still valid
-        return;
+        Serial.println("Cannot send update: Device not connected. Update pending.");
+        // Don't change state here. The state machine will handle it.
+        // The updated scheduleDoc remains loaded.
+        return; // Exit without sending
     }
+
+    // --- Check if data exists ---
     if (!scheduleLoaded || scheduleDoc.isNull())
     {
-        Serial.println("Cannot send update: No schedule data.");
+        Serial.println("Cannot send update: No schedule data loaded.");
+        // If there's no data, we can safely go idle.
         currentState = STATE_IDLE;
         return;
     }
 
+    // --- Proceed with sending ---
     Serial.println("Serializing updated schedule...");
     String outputJson;
+    // Use serializeJsonPretty for easier debugging if needed, otherwise serializeJson
     serializeJson(scheduleDoc, outputJson);
+    // serializeJsonPretty(scheduleDoc, Serial); // Debug output
 
     Serial.print("Sending Update: ");
     Serial.println(outputJson.c_str());
 
-    // Send the JSON string via BLE Notification
-    // Note: BLE notifications have size limits (MTU). If JSON is very large,
-    // it might need chunking, but the library handles basic fragmentation.
     pCharacteristic->setValue(outputJson.c_str());
     pCharacteristic->notify();
     blinkLed(); // Blink on send
 
-    Serial.println("Update sent.");
-    // Decide what to do next. Go idle? Clear schedule?
-    // Let's go idle, waiting for a new schedule or command.
+    Serial.println("Update sent successfully.");
+
+    // --- IMPORTANT: Decide what to do after successful send ---
+    // Option 1: Go idle, keep data (allows resending if requested again)
     currentState = STATE_IDLE;
-    // scheduleLoaded = false; // Optional: Clear schedule after sending?
+    Serial.println("State changed to STATE_IDLE after sending.");
+
+    // Option 2: Go idle, clear data (requires new schedule)
+    // scheduleLoaded = false;
     // scheduleDoc.clear();
-    Serial.println("State changed to STATE_IDLE");
+    // if (LittleFS.exists(SCHEDULE_FILENAME)) { // Also clear persisted file?
+    //     LittleFS.remove(SCHEDULE_FILENAME);
+    // }
+    // currentState = STATE_IDLE;
+    // Serial.println("State changed to STATE_IDLE and schedule cleared after sending.");
+
+    // Let's stick with Option 1 (keep data) for now.
 }
 
 // --- LittleFS Functions (Optional but Recommended) ---
@@ -616,9 +697,18 @@ void loop()
         break;
 
     case STATE_SENDING_UPDATE:
-        // Send the final schedule with responses
+        // Attempt to send the update
         sendUpdate();
-        // sendUpdate() changes state back to IDLE after sending
+        // If sendUpdate was called but couldn't send (because device was disconnected),
+        // it would have returned without changing the state. We should transition
+        // back to IDLE here, as the "sending attempt" is done for this cycle.
+        // The data remains loaded for a future request.
+        // If sendUpdate *did* send successfully, it already set the state to IDLE.
+        if (currentState == STATE_SENDING_UPDATE)
+        { // Check if sendUpdate didn't already change state
+            Serial.println("Send attempt finished (or skipped if disconnected). Returning to IDLE.");
+            currentState = STATE_IDLE;
+        }
         break;
     }
 
