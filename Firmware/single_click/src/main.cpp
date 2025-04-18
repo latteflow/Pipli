@@ -43,6 +43,19 @@ bool oldDeviceConnected = false;
 
 int value = 0;
 
+template <class T>
+inline Print &operator<<(Print &obj, T arg)
+{
+  obj.print(arg);
+  return obj;
+}
+template <>
+inline Print &operator<<(Print &obj, float arg)
+{
+  obj.print(arg, 4);
+  return obj;
+}
+
 class MyServerCallbacks : public BLEServerCallbacks
 {
   void onConnect(BLEServer *pServer)
@@ -54,6 +67,24 @@ class MyServerCallbacks : public BLEServerCallbacks
   void onDisconnect(BLEServer *pServer)
   {
     deviceConnected = false;
+  }
+};
+
+class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
+{
+  void onWrite(BLECharacteristic *pCharacteristic)
+  {
+    std::string rxValue = pCharacteristic->getValue();
+    if (rxValue.length() > 0)
+    {
+
+      Serial.println(" ");
+      Serial.print("Received data: ");
+      for (int i = 0; i < rxValue.length(); i++)
+      {
+        Serial.print(rxValue[i]);
+      }
+    }
   }
 };
 
@@ -80,7 +111,9 @@ void setup()
       CHARACTERISTIC_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_INDICATE);
 
-  // https://www.bluetooth.com/specifications/gatt/viewer?attributeXmlFile=org.bluetooth.descriptor.gatt.client_characteristic_configuration.xml
+  // incoming writes
+  pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
+
   // Create a BLE Descriptor
   pCharacteristic->addDescriptor(new BLE2902());
 
@@ -90,8 +123,9 @@ void setup()
   // Start advertising
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(false);
-  pAdvertising->setMinPreferred(0x0); // set value to 0x00 to not advertise this parameter
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
+  pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
   Serial.println("Waiting a client connection to notify...");
 }
@@ -120,7 +154,6 @@ void loop()
   // notify changed value
   if (deviceConnected)
   {
-
     String str = "Hello from Pipli!" + String(value); // String to send
     int str_len = str.length() + 1;
 
@@ -130,16 +163,9 @@ void loop()
     // Copy it over
     str.toCharArray(char_array, str_len);
     pCharacteristic->setValue(char_array); // to send a test message
-    //    pCharacteristic->setValue(txString);  // prepare to send array
+
     pCharacteristic->notify(); // send the value to the app!
-
-    // pCharacteristic->setValue(value.c_str());
-    // pCharacteristic->notify();
     value++;
-
-    // std::string rx = pCharacteristic->getValue();
-    // Serial.println(rx.c_str());
-
     delay(2000); // bluetooth stack will go into congestion, if too many packets are sent, in 6 hours test i was able to go as low as 3ms
   }
   // disconnecting
