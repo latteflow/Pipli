@@ -1,29 +1,20 @@
-/*
-    Video: https://www.youtube.com/watch?v=oCMOYS71NIU
-    Based on Neil Kolban example for IDF: https://github.com/nkolban/esp32-snippets/blob/master/cpp_utils/tests/BLE%20Tests/SampleNotify.cpp
-    Ported to Arduino ESP32 by Evandro Copercini
-    updated by chegewara
 
-   Create a BLE server that, once we receive a connection, will send periodic notifications.
-   The service advertises itself as: 4fafc201-1fb5-459e-8fcc-c5c9c331914b
-   And has a characteristic of: beb5483e-36e1-4688-b7f5-ea07361b26a8
-
-   The design of creating the BLE server is:
-   1. Create a BLE Server
-   2. Create a BLE Service
-   3. Create a BLE Characteristic on the Service
-   4. Create a BLE Descriptor on the characteristic
-   5. Start the service.
-   6. Start advertising.
-
-   A connect handler associated with the server starts a background task that performs notification
-   every couple of seconds.
-*/
 #include <Arduino.h>
+
+// bluetooth related
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+
+// srorage related
+#include "FS.h"
+#include <LittleFS.h>
+
+// JSON data library
+#include <ArduinoJson.h>
+
+#define FORMAT_LITTLEFS_IF_FAILED true
 
 BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
@@ -103,9 +94,248 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
   }
 };
 
+//==================== STORAGE RELATED ====================//
+
+void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
+{
+  Serial.printf("Listing directory: %s\r\n", dirname);
+
+  File root = fs.open(dirname);
+  if (!root)
+  {
+    Serial.println("- failed to open directory");
+    return;
+  }
+  if (!root.isDirectory())
+  {
+    Serial.println(" - not a directory");
+    return;
+  }
+
+  File file = root.openNextFile();
+  while (file)
+  {
+    if (file.isDirectory())
+    {
+      Serial.print("  DIR : ");
+      Serial.println(file.name());
+      if (levels)
+      {
+        listDir(fs, file.path(), levels - 1);
+      }
+    }
+    else
+    {
+      Serial.print("  FILE: ");
+      Serial.print(file.name());
+      Serial.print("\tSIZE: ");
+      Serial.println(file.size());
+    }
+    file = root.openNextFile();
+  }
+}
+
+void createDir(fs::FS &fs, const char *path)
+{
+  Serial.printf("Creating Dir: %s\n", path);
+  if (fs.mkdir(path))
+  {
+    Serial.println("Dir created");
+  }
+  else
+  {
+    Serial.println("mkdir failed");
+  }
+}
+
+void removeDir(fs::FS &fs, const char *path)
+{
+  Serial.printf("Removing Dir: %s\n", path);
+  if (fs.rmdir(path))
+  {
+    Serial.println("Dir removed");
+  }
+  else
+  {
+    Serial.println("rmdir failed");
+  }
+}
+
+void readFile(fs::FS &fs, const char *path)
+{
+  Serial.printf("Reading file: %s\r\n", path);
+
+  File file = fs.open(path);
+  if (!file || file.isDirectory())
+  {
+    Serial.println("- failed to open file for reading");
+    return;
+  }
+
+  JsonDocument doc;
+  deserializeJson(doc, file);
+  const char *sensor = doc["sensor"];
+  long time = doc["time"];
+  double latitude = doc["data"][0];
+  double longitude = doc["data"][1];
+
+  Serial.println(sensor);
+  Serial.println(time);
+  Serial.println(latitude, 6);
+  Serial.println(longitude, 6);
+  Serial.println("Json parse working");
+
+  Serial.println("- read from file:");
+  while (file.available())
+  {
+    Serial.write(file.read());
+  }
+  file.close();
+}
+
+void writeFile(fs::FS &fs, const char *path, const char *message)
+{
+  Serial.printf("Writing file: %s\r\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if (!file)
+  {
+    Serial.println("- failed to open file for writing");
+    return;
+  }
+  if (file.print(message))
+  {
+    Serial.println("- file written");
+  }
+  else
+  {
+    Serial.println("- write failed");
+  }
+  file.close();
+}
+
+void appendFile(fs::FS &fs, const char *path, const char *message)
+{
+  Serial.printf("Appending to file: %s\r\n", path);
+
+  File file = fs.open(path, FILE_APPEND);
+  if (!file)
+  {
+    Serial.println("- failed to open file for appending");
+    return;
+  }
+  if (file.print(message))
+  {
+    Serial.println("- message appended");
+  }
+  else
+  {
+    Serial.println("- append failed");
+  }
+  file.close();
+}
+
+void renameFile(fs::FS &fs, const char *path1, const char *path2)
+{
+  Serial.printf("Renaming file %s to %s\r\n", path1, path2);
+  if (fs.rename(path1, path2))
+  {
+    Serial.println("- file renamed");
+  }
+  else
+  {
+    Serial.println("- rename failed");
+  }
+}
+
+void deleteFile(fs::FS &fs, const char *path)
+{
+  Serial.printf("Deleting file: %s\r\n", path);
+  if (fs.remove(path))
+  {
+    Serial.println("- file deleted");
+  }
+  else
+  {
+    Serial.println("- delete failed");
+  }
+}
+
+void testFileIO(fs::FS &fs, const char *path)
+{
+  Serial.printf("Testing file I/O with %s\r\n", path);
+
+  static uint8_t buf[512];
+  size_t len = 0;
+  File file = fs.open(path, FILE_WRITE);
+  if (!file)
+  {
+    Serial.println("- failed to open file for writing");
+    return;
+  }
+
+  size_t i;
+  Serial.print("- writing");
+  uint32_t start = millis();
+  for (i = 0; i < 2048; i++)
+  {
+    if ((i & 0x001F) == 0x001F)
+    {
+      Serial.print(".");
+    }
+    file.write(buf, 512);
+  }
+  Serial.println("");
+  uint32_t end = millis() - start;
+  Serial.printf(" - %u bytes written in %lu ms\r\n", 2048 * 512, end);
+  file.close();
+
+  file = fs.open(path);
+  start = millis();
+  end = start;
+  i = 0;
+  if (file && !file.isDirectory())
+  {
+    len = file.size();
+    size_t flen = len;
+    start = millis();
+    Serial.print("- reading");
+    while (len)
+    {
+      size_t toRead = len;
+      if (toRead > 512)
+      {
+        toRead = 512;
+      }
+      file.read(buf, toRead);
+      if ((i++ & 0x001F) == 0x001F)
+      {
+        Serial.print(".");
+      }
+      len -= toRead;
+    }
+    Serial.println("");
+    end = millis() - start;
+    Serial.printf("- %u bytes read in %lu ms\r\n", flen, end);
+    file.close();
+  }
+  else
+  {
+    Serial.println("- failed to open file for reading");
+  }
+}
+//==================== END STORAGE RELATED ====================//
+
 void setup()
 {
   Serial.begin(115200);
+
+  // Initialize LittleFS
+  if (!LittleFS.begin(FORMAT_LITTLEFS_IF_FAILED))
+  {
+    Serial.println("LittleFS Mount Failed");
+    return;
+  }
 
   pinMode(VIBRATION_PIN, OUTPUT);
   pinMode(PAIR_PIN, INPUT);
@@ -146,6 +376,15 @@ void setup()
   pAdvertising->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
   Serial.println("Waiting a client connection to notify...");
+
+  // JSON input string.
+  const char *json = "{\"sensor\":\"gps\",\"time\":1351824120,\"data\":[48.756080,2.302038]}";
+  delay(3000);
+  listDir(LittleFS, "/", 3);
+  createDir(LittleFS, "/mydir");
+  writeFile(LittleFS, "/mydir/hello.txt", json);
+  listDir(LittleFS, "/", 1);
+  readFile(LittleFS, "/mydir/hello.txt");
 }
 
 void loop()
@@ -168,6 +407,21 @@ void loop()
   {
     digitalWrite(VIBRATION_PIN, LOW);
   }
+
+  EVERY_N_SECONDS(5)
+  {
+    // Serial.println("5 seconds passed");
+    // notify changed value
+    digitalWrite(VIBRATION_PIN, HIGH);
+  }
+  JsonDocument doc;
+
+  doc["med_id"] = "A";
+  doc["time"] = 1351824120;
+  doc["ala_time"][0] = 48.756080;
+  doc["ala_time"][1] = 2.302038;
+
+  serializeJson(doc, Serial);
 
   // reset value on disconnection
   if (!deviceConnected)
