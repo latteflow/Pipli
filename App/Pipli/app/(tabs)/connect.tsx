@@ -31,19 +31,6 @@ const ConnectScreen = () => {
     const [dataToSend, setDataToSend] = useState<string>("");
     const [isSending, setIsSending] = useState<boolean>(false);
 
-    // // --- useEffect to automatically close modal on disconnect ---
-    // useEffect(() => {
-    //     // If the modal is currently flagged as visible in state,
-    //     // but the device becomes disconnected (connectedDevice becomes null),
-    //     // then automatically hide the modal by updating the state.
-    //     if (isModalVisible && connectedDevice === null) {
-    //         console.log("[Effect] Device disconnected/null while modal visible. Hiding modal.");
-    //         setIsModalVisible(false);
-    //     }
-    // }, [connectedDevice, isModalVisible]); // Re-run this effect if connection status or modal visibility flag changes
-    // // --- End of useEffect ---
-
-
     /**
      * Requests permissions and initiates scanning.
      * Returns true if permissions were granted, false otherwise.
