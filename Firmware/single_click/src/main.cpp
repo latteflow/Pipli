@@ -7,7 +7,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-// srorage related
+// srorage related (Optional but recommended for persistence)
 #include "FS.h"
 #include <LittleFS.h>
 
@@ -15,6 +15,7 @@
 #include <ArduinoJson.h>
 
 #define FORMAT_LITTLEFS_IF_FAILED true
+#define SCHEDULE_FILENAME "/schedule.json"
 
 BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
@@ -28,446 +29,599 @@ bool oldDeviceConnected = false;
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 #define VIBRATION_PIN 19
-#define PAIR_PIN 23
-#define USER_PIN 34
+#define PAIR_PIN 23 // Not used in reminder logic, but kept for consistency
+#define USER_PIN 34 // Used for responding to reminders
 #define LED 2
 
-#define MTU 200              // Maximum Transmission Unit
 #define BLINK_DURATION_MS 50 // How long the LED stays on during a blink
 
-int value = 0;
+// --- Reminder System Settings ---
+#define VIBRATION_DURATION_MS 2000 // How long to vibrate for a reminder
+#define RESPONSE_TIMEOUT_MS 15000  // How long to wait for user input after vibration
 
-// Stream opearator
+// --- State Machine ---
+enum State
+{
+    STATE_IDLE,                // Waiting for a schedule or connection
+    STATE_PROCESSING_SCHEDULE, // Actively checking reminder times
+    STATE_VIBRATING,           // Currently vibrating for a reminder
+    STATE_WAITING_RESPONSE,    // Waiting for user button press after vibration
+    STATE_SENDING_UPDATE       // Preparing/sending updated schedule
+};
+State currentState = STATE_IDLE;
+
+// -- -Schedule Data-- -
+// Use JsonDocument for flexibility. Adjust size as needed.
+JsonDocument scheduleDoc; // Increased size for schedule + responses
+bool scheduleLoaded = false;
+unsigned long scheduleReceiveTime = 0; // millis() when schedule was received/loaded
+
+// --- Reminder Tracking ---
+int currentMedIndex = -1;
+int currentTimeIndex = -1;
+unsigned long stateTimer = 0; // Used for vibration duration and response timeout
+
+// --- Function Prototypes ---
+void blinkLed();
+void startVibration();
+void stopVibration();
+bool loadSchedule();
+bool saveSchedule();
+void processSchedule();
+void sendUpdate();
+void moveToNextReminder();
+void handleReceivedData(const std::string &data);
+
+// Stream opearator (kept from original)
 template <class T>
 inline Print &operator<<(Print &obj, T arg)
 {
-  obj.print(arg);
-  return obj;
+    obj.print(arg);
+    return obj;
 }
 template <>
 inline Print &operator<<(Print &obj, float arg)
 {
-  obj.print(arg, 4);
-  return obj;
+    obj.print(arg, 4);
+    return obj;
 }
-
 // It preserves the original LED state if it was meant to be ON (connected)
 void blinkLed()
 {
-  bool originalState = digitalRead(LED); // Read current state (might be HIGH if connected)
-  digitalWrite(LED, !originalState);     // Toggle LED ON (if off) or OFF (if on) briefly
-  delay(BLINK_DURATION_MS);
-  digitalWrite(LED, originalState); // Restore original state
+    bool originalState = digitalRead(LED);
+    digitalWrite(LED, !originalState);
+    delay(BLINK_DURATION_MS);
+    digitalWrite(LED, originalState);
+}
+
+void startVibration()
+{
+    Serial.println("Starting Vibration");
+    digitalWrite(VIBRATION_PIN, HIGH);
+}
+
+void stopVibration()
+{
+    Serial.println("Stopping Vibration");
+    digitalWrite(VIBRATION_PIN, LOW);
 }
 
 class MyServerCallbacks : public BLEServerCallbacks
 {
-  void onConnect(BLEServer *pServer)
-  {
-    deviceConnected = true;
-    BLEDevice::startAdvertising();
-  };
+    void onConnect(BLEServer *pServer)
+    {
+        deviceConnected = true;
+        digitalWrite(LED, HIGH); // LED ON when connected
+        Serial.println("Device Connected");
+        // Optional: Maybe request schedule update on connect?
+        // pCharacteristic->setValue("REQUEST_SCHEDULE");
+        // pCharacteristic->notify();
+    };
 
-  void onDisconnect(BLEServer *pServer)
-  {
-    deviceConnected = false;
-  }
+    void onDisconnect(BLEServer *pServer)
+    {
+        deviceConnected = false;
+        digitalWrite(LED, LOW); // LED OFF when disconnected
+        Serial.println("Device Disconnected - Restarting Advertising");
+        // Reset state if needed when disconnected? Maybe not, allow processing offline.
+        // currentState = STATE_IDLE;
+        // scheduleLoaded = false;
+        delay(500);                  // Give stack time
+        pServer->startAdvertising(); // Restart advertising
+    }
 };
 
 class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
 {
-  void onWrite(BLECharacteristic *pCharacteristic)
-  {
-    std::string rxValue = pCharacteristic->getValue();
-    if (rxValue.length() > 0)
+    void onWrite(BLECharacteristic *pCharacteristic)
     {
+        std::string rxValue = pCharacteristic->getValue();
+        if (rxValue.length() > 0)
+        {
+            Serial.println(" ");
+            Serial.print("Received data: ");
+            Serial.println(rxValue.c_str());
+            blinkLed(); // Blink on any receive
 
-      Serial.println(" ");
-      Serial.print("Received data: ");
-      for (int i = 0; i < rxValue.length(); i++)
-      {
-        Serial.print(rxValue[i]);
-      }
-      Serial.println();
-      blinkLed();
+            // Handle the received data (expecting schedule JSON)
+            handleReceivedData(rxValue);
+        }
     }
-  }
 };
 
-//==================== STORAGE RELATED ====================//
+// --- Schedule Handling Logic ---
 
-void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
+void handleReceivedData(const std::string &data)
 {
-  Serial.printf("Listing directory: %s\r\n", dirname);
+    Serial.println("Attempting to parse schedule...");
+    // Clear previous schedule data
+    scheduleDoc.clear();
+    DeserializationError error = deserializeJson(scheduleDoc, data);
 
-  File root = fs.open(dirname);
-  if (!root)
-  {
-    Serial.println("- failed to open directory");
-    return;
-  }
-  if (!root.isDirectory())
-  {
-    Serial.println(" - not a directory");
-    return;
-  }
-
-  File file = root.openNextFile();
-  while (file)
-  {
-    if (file.isDirectory())
+    if (error)
     {
-      Serial.print("  DIR : ");
-      Serial.println(file.name());
-      if (levels)
-      {
-        listDir(fs, file.path(), levels - 1);
-      }
+        Serial.print(F("deserializeJson() failed: "));
+        Serial.println(error.f_str());
+        scheduleLoaded = false;
+        currentState = STATE_IDLE; // Go back to idle if parsing failed
+        return;
+    }
+
+    // Check if it's an array (basic validation)
+    if (!scheduleDoc.is<JsonArray>())
+    {
+        Serial.println("Error: Received JSON is not an array.");
+        scheduleLoaded = false;
+        currentState = STATE_IDLE;
+        return;
+    }
+
+    // --- IMPORTANT: Modify the structure to store responses ---
+    // Iterate through the received schedule and transform the 'times' array
+    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    for (JsonObject med : scheduleArray)
+    {
+        if (med.containsKey("times") && med["times"].is<JsonArray>())
+        {
+            JsonArray originalTimes = med["times"].as<JsonArray>();
+            JsonArray newTimesArray; // Create a new array for objects
+
+            for (JsonVariant t : originalTimes)
+            {
+                JsonObject timeObj = newTimesArray.createNestedObject();
+                // Assuming original times are strings representing seconds offset
+                timeObj["time"] = t.as<String>();
+                timeObj["responded"] = false; // Initialize response as null (or false)
+            }
+            // Replace the original 'times' array with the new array of objects
+            med["times"] = newTimesArray;
+        }
+        else
+        {
+            Serial.println("Warning: Medication entry missing 'times' array or invalid format.");
+            // Optionally remove this invalid entry or handle it
+        }
+    }
+
+    Serial.println("Schedule parsed and structure updated successfully.");
+    scheduleLoaded = true;
+    scheduleReceiveTime = millis();           // Record time for relative reminders
+    currentMedIndex = 0;                      // Start from the first medication
+    currentTimeIndex = 0;                     // Start from the first time for that medication
+    currentState = STATE_PROCESSING_SCHEDULE; // Start processing
+    Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
+
+    // Save the initial schedule with null responses (optional but good)
+    saveSchedule();
+
+    // Optional: Send confirmation back
+    // pCharacteristic->setValue("ACK_SCHEDULE_RECEIVED");
+    // pCharacteristic->notify();
+    // blinkLed();
+}
+
+// Find the next reminder time and check if it's due
+void processSchedule()
+{
+    if (!scheduleLoaded || scheduleDoc.isNull() || !scheduleDoc.is<JsonArray>())
+    {
+        currentState = STATE_IDLE;
+        return;
+    }
+
+    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+
+    // Check if we've processed all medications
+    if (currentMedIndex >= scheduleArray.size())
+    {
+        Serial.println("All medications processed.");
+        // Optionally send update automatically here, or wait for request
+        currentState = STATE_SENDING_UPDATE; // Or STATE_IDLE
+        return;
+    }
+
+    JsonObject currentMed = scheduleArray[currentMedIndex];
+    if (!currentMed || !currentMed.containsKey("times") || !currentMed["times"].is<JsonArray>())
+    {
+        Serial.println("Invalid medication entry or missing times. Skipping.");
+        moveToNextReminder(); // Skip to next med/time
+        return;
+    }
+
+    JsonArray timesArray = currentMed["times"].as<JsonArray>();
+
+    // Check if we've processed all times for this medication
+    if (currentTimeIndex >= timesArray.size())
+    {
+        Serial.printf("Finished times for med_id %s. Moving to next med.\n", currentMed["med_id"].as<const char *>());
+        currentMedIndex++;
+        currentTimeIndex = 0;
+        // Re-run processSchedule to check the next med immediately
+        // or wait for the next loop iteration
+        return; // Let the next loop iteration handle the next med index check
+    }
+
+    JsonObject timeObj = timesArray[currentTimeIndex];
+    if (!timeObj || !timeObj.containsKey("time") || !timeObj.containsKey("responded"))
+    {
+        Serial.println("Invalid time object. Skipping.");
+        moveToNextReminder();
+        return;
+    }
+
+    // Check if this reminder has already been processed (responded is not null)
+    if (!timeObj["responded"].isNull())
+    {
+        // Serial.println("Reminder already processed. Skipping.");
+        moveToNextReminder();
+        return;
+    }
+
+    // --- Calculate Time ---
+    // Assuming "time" is a string representing offset in SECONDS
+    long reminderOffsetSeconds = timeObj["time"].as<String>().toInt();
+    unsigned long reminderDueTimeMillis = scheduleReceiveTime + (reminderOffsetSeconds * 1000UL);
+    unsigned long currentTimeMillis = millis();
+
+    // Serial.printf("Checking Med %d, Time %d: Due at %lu ms, Current %lu ms\n",
+    //               currentMedIndex, currentTimeIndex, reminderDueTimeMillis, currentTimeMillis);
+
+    if (currentTimeMillis >= reminderDueTimeMillis)
+    {
+        Serial.printf("Reminder Due! Med ID: %s, Time Offset: %s\n",
+                      currentMed["med_id"].as<const char *>(),
+                      timeObj["time"].as<const char *>());
+
+        startVibration();
+        stateTimer = millis(); // Start timer for vibration duration
+        currentState = STATE_VIBRATING;
+        Serial.println("State changed to STATE_VIBRATING");
+    }
+    // Else: Not time yet, keep checking in the next loop iteration
+}
+
+void moveToNextReminder()
+{
+    if (!scheduleLoaded || !scheduleDoc.is<JsonArray>())
+        return;
+    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    if (currentMedIndex < 0 || currentMedIndex >= scheduleArray.size())
+        return; // Invalid state
+
+    JsonObject currentMed = scheduleArray[currentMedIndex];
+    if (!currentMed || !currentMed.containsKey("times") || !currentMed["times"].is<JsonArray>())
+    {
+        // Invalid med, try next one
+        currentMedIndex++;
+        currentTimeIndex = 0;
+        return;
+    }
+
+    JsonArray timesArray = currentMed["times"].as<JsonArray>();
+    currentTimeIndex++; // Move to next time slot
+
+    if (currentTimeIndex >= timesArray.size())
+    {
+        // Finished times for this med, move to next med
+        currentMedIndex++;
+        currentTimeIndex = 0; // Reset time index for the new med
+    }
+    // State remains STATE_PROCESSING_SCHEDULE to check the next one
+}
+
+void recordResponse(bool responded)
+{
+    if (!scheduleLoaded || !scheduleDoc.is<JsonArray>() || currentMedIndex < 0 || currentTimeIndex < 0)
+    {
+        Serial.println("Error: Cannot record response, schedule not loaded or indices invalid.");
+        return;
+    }
+    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    if (currentMedIndex >= scheduleArray.size())
+        return;
+    JsonObject currentMed = scheduleArray[currentMedIndex];
+    if (!currentMed || !currentMed.containsKey("times") || !currentMed["times"].is<JsonArray>())
+        return;
+    JsonArray timesArray = currentMed["times"].as<JsonArray>();
+    if (currentTimeIndex >= timesArray.size())
+        return;
+    JsonObject timeObj = timesArray[currentTimeIndex];
+    if (!timeObj)
+        return;
+
+    Serial.printf("Recording response for Med %d, Time %d: %s\n", currentMedIndex, currentTimeIndex, responded ? "Yes" : "No");
+    timeObj["responded"] = responded;
+
+    // Save the updated schedule after recording response
+    saveSchedule();
+
+    // Move to the next reminder check
+    moveToNextReminder();
+    currentState = STATE_PROCESSING_SCHEDULE; // Go back to checking times
+    Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
+}
+
+void sendUpdate()
+{
+    if (!deviceConnected)
+    {
+        Serial.println("Cannot send update: Device not connected.");
+        currentState = STATE_IDLE; // Or back to processing if schedule still valid
+        return;
+    }
+    if (!scheduleLoaded || scheduleDoc.isNull())
+    {
+        Serial.println("Cannot send update: No schedule data.");
+        currentState = STATE_IDLE;
+        return;
+    }
+
+    Serial.println("Serializing updated schedule...");
+    String outputJson;
+    serializeJson(scheduleDoc, outputJson);
+
+    Serial.print("Sending Update: ");
+    Serial.println(outputJson.c_str());
+
+    // Send the JSON string via BLE Notification
+    // Note: BLE notifications have size limits (MTU). If JSON is very large,
+    // it might need chunking, but the library handles basic fragmentation.
+    pCharacteristic->setValue(outputJson.c_str());
+    pCharacteristic->notify();
+    blinkLed(); // Blink on send
+
+    Serial.println("Update sent.");
+    // Decide what to do next. Go idle? Clear schedule?
+    // Let's go idle, waiting for a new schedule or command.
+    currentState = STATE_IDLE;
+    // scheduleLoaded = false; // Optional: Clear schedule after sending?
+    // scheduleDoc.clear();
+    Serial.println("State changed to STATE_IDLE");
+}
+
+// --- LittleFS Functions (Optional but Recommended) ---
+bool initializeFS()
+{
+    if (!LittleFS.begin(FORMAT_LITTLEFS_IF_FAILED))
+    {
+        Serial.println("LittleFS Mount Failed");
+        return false;
+    }
+    Serial.println("LittleFS Mounted.");
+    return true;
+}
+
+bool saveSchedule()
+{
+    if (!scheduleLoaded || scheduleDoc.isNull())
+    {
+        Serial.println("No schedule data to save.");
+        // Optionally delete existing file if schedule is cleared
+        // if (LittleFS.exists(SCHEDULE_FILENAME)) {
+        //     LittleFS.remove(SCHEDULE_FILENAME);
+        // }
+        return false;
+    }
+
+    File file = LittleFS.open(SCHEDULE_FILENAME, FILE_WRITE);
+    if (!file)
+    {
+        Serial.println("Failed to open schedule file for writing");
+        return false;
+    }
+
+    size_t bytesWritten = serializeJson(scheduleDoc, file);
+    file.close();
+
+    if (bytesWritten > 0)
+    {
+        Serial.printf("Schedule saved to %s (%d bytes)\n", SCHEDULE_FILENAME, bytesWritten);
+        return true;
     }
     else
     {
-      Serial.print("  FILE: ");
-      Serial.print(file.name());
-      Serial.print("\tSIZE: ");
-      Serial.println(file.size());
+        Serial.println("Failed to write schedule to file.");
+        // Attempt to delete potentially corrupted file
+        LittleFS.remove(SCHEDULE_FILENAME);
+        return false;
     }
-    file = root.openNextFile();
-  }
 }
 
-void createDir(fs::FS &fs, const char *path)
+bool loadSchedule()
 {
-  Serial.printf("Creating Dir: %s\n", path);
-  if (fs.mkdir(path))
-  {
-    Serial.println("Dir created");
-  }
-  else
-  {
-    Serial.println("mkdir failed");
-  }
-}
-
-void removeDir(fs::FS &fs, const char *path)
-{
-  Serial.printf("Removing Dir: %s\n", path);
-  if (fs.rmdir(path))
-  {
-    Serial.println("Dir removed");
-  }
-  else
-  {
-    Serial.println("rmdir failed");
-  }
-}
-
-void readFile(fs::FS &fs, const char *path)
-{
-  Serial.printf("Reading file: %s\r\n", path);
-
-  File file = fs.open(path);
-  if (!file || file.isDirectory())
-  {
-    Serial.println("- failed to open file for reading");
-    return;
-  }
-
-  JsonDocument doc;
-  deserializeJson(doc, file);
-  const char *sensor = doc["sensor"];
-  long time = doc["time"];
-  double latitude = doc["data"][0];
-  double longitude = doc["data"][1];
-
-  Serial.println(sensor);
-  Serial.println(time);
-  Serial.println(latitude, 6);
-  Serial.println(longitude, 6);
-  Serial.println("Json parse working");
-
-  Serial.println("- read from file:");
-  while (file.available())
-  {
-    Serial.write(file.read());
-  }
-  file.close();
-}
-
-void writeFile(fs::FS &fs, const char *path, const char *message)
-{
-  Serial.printf("Writing file: %s\r\n", path);
-
-  File file = fs.open(path, FILE_WRITE);
-  if (!file)
-  {
-    Serial.println("- failed to open file for writing");
-    return;
-  }
-  if (file.print(message))
-  {
-    Serial.println("- file written");
-  }
-  else
-  {
-    Serial.println("- write failed");
-  }
-  file.close();
-}
-
-void appendFile(fs::FS &fs, const char *path, const char *message)
-{
-  Serial.printf("Appending to file: %s\r\n", path);
-
-  File file = fs.open(path, FILE_APPEND);
-  if (!file)
-  {
-    Serial.println("- failed to open file for appending");
-    return;
-  }
-  if (file.print(message))
-  {
-    Serial.println("- message appended");
-  }
-  else
-  {
-    Serial.println("- append failed");
-  }
-  file.close();
-}
-
-void renameFile(fs::FS &fs, const char *path1, const char *path2)
-{
-  Serial.printf("Renaming file %s to %s\r\n", path1, path2);
-  if (fs.rename(path1, path2))
-  {
-    Serial.println("- file renamed");
-  }
-  else
-  {
-    Serial.println("- rename failed");
-  }
-}
-
-void deleteFile(fs::FS &fs, const char *path)
-{
-  Serial.printf("Deleting file: %s\r\n", path);
-  if (fs.remove(path))
-  {
-    Serial.println("- file deleted");
-  }
-  else
-  {
-    Serial.println("- delete failed");
-  }
-}
-
-void testFileIO(fs::FS &fs, const char *path)
-{
-  Serial.printf("Testing file I/O with %s\r\n", path);
-
-  static uint8_t buf[512];
-  size_t len = 0;
-  File file = fs.open(path, FILE_WRITE);
-  if (!file)
-  {
-    Serial.println("- failed to open file for writing");
-    return;
-  }
-
-  size_t i;
-  Serial.print("- writing");
-  uint32_t start = millis();
-  for (i = 0; i < 2048; i++)
-  {
-    if ((i & 0x001F) == 0x001F)
+    if (!LittleFS.exists(SCHEDULE_FILENAME))
     {
-      Serial.print(".");
+        Serial.println("Schedule file not found.");
+        return false;
     }
-    file.write(buf, 512);
-  }
-  Serial.println("");
-  uint32_t end = millis() - start;
-  Serial.printf(" - %u bytes written in %lu ms\r\n", 2048 * 512, end);
-  file.close();
 
-  file = fs.open(path);
-  start = millis();
-  end = start;
-  i = 0;
-  if (file && !file.isDirectory())
-  {
-    len = file.size();
-    size_t flen = len;
-    start = millis();
-    Serial.print("- reading");
-    while (len)
+    File file = LittleFS.open(SCHEDULE_FILENAME, FILE_READ);
+    if (!file)
     {
-      size_t toRead = len;
-      if (toRead > 512)
-      {
-        toRead = 512;
-      }
-      file.read(buf, toRead);
-      if ((i++ & 0x001F) == 0x001F)
-      {
-        Serial.print(".");
-      }
-      len -= toRead;
+        Serial.println("Failed to open schedule file for reading");
+        return false;
     }
-    Serial.println("");
-    end = millis() - start;
-    Serial.printf("- %u bytes read in %lu ms\r\n", flen, end);
+
+    // Clear existing data before loading
+    scheduleDoc.clear();
+    DeserializationError error = deserializeJson(scheduleDoc, file);
     file.close();
-  }
-  else
-  {
-    Serial.println("- failed to open file for reading");
-  }
-}
-//==================== END STORAGE RELATED ====================//
 
+    if (error)
+    {
+        Serial.print(F("Failed to parse schedule file: "));
+        Serial.println(error.f_str());
+        // Delete corrupted file?
+        // LittleFS.remove(SCHEDULE_FILENAME);
+        return false;
+    }
+
+    if (!scheduleDoc.is<JsonArray>())
+    {
+        Serial.println("Error: Loaded schedule file is not a JSON array.");
+        return false;
+    }
+
+    Serial.println("Schedule loaded successfully from LittleFS.");
+    scheduleLoaded = true;
+    scheduleReceiveTime = millis(); // Treat load time as the new reference
+    currentMedIndex = 0;            // Start processing from the beginning
+    currentTimeIndex = 0;
+    // Don't automatically start processing? Or should we? Let's start.
+    currentState = STATE_PROCESSING_SCHEDULE;
+    Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
+    return true;
+}
+
+//==================== SETUP ====================//
 void setup()
 {
-  Serial.begin(115200);
+    Serial.begin(115200);
+    Serial.println("\nStarting Pipli Reminder Device...");
 
-  // Initialize LittleFS
-  if (!LittleFS.begin(FORMAT_LITTLEFS_IF_FAILED))
-  {
-    Serial.println("LittleFS Mount Failed");
-    return;
-  }
+    // Initialize LittleFS
+    if (!initializeFS())
+    {
+        // Handle FS failure (e.g., loop forever, indicate error)
+        Serial.println("CRITICAL: File System Failed. Halting.");
+        while (1)
+            delay(1000);
+    }
 
-  pinMode(VIBRATION_PIN, OUTPUT);
-  pinMode(PAIR_PIN, INPUT);
-  pinMode(USER_PIN, INPUT);
+    pinMode(VIBRATION_PIN, OUTPUT);
+    pinMode(PAIR_PIN, INPUT_PULLDOWN); // Use pulldown/pullup as appropriate
+    pinMode(USER_PIN, INPUT_PULLDOWN); // Use pulldown for response button
+    pinMode(LED, OUTPUT);
 
-  pinMode(LED, OUTPUT);   // Built-in LED
-  digitalWrite(LED, LOW); // Ensure LED is off initially
+    digitalWrite(VIBRATION_PIN, LOW); // Ensure vibration is off
+    digitalWrite(LED, LOW);           // Ensure LED is off
 
-  // Create the BLE Device
-  BLEDevice::init("Pipli");
+    // --- Try to load existing schedule ---
+    if (loadSchedule())
+    {
+        Serial.println("Existing schedule loaded. Will start processing.");
+        // State is set to STATE_PROCESSING_SCHEDULE inside loadSchedule()
+    }
+    else
+    {
+        Serial.println("No existing schedule found or load failed. Waiting for BLE connection.");
+        currentState = STATE_IDLE;
+    }
 
-  // Create the BLE Server
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
+    // --- Initialize BLE ---
+    BLEDevice::init("Pipli");
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    pCharacteristic = pService->createCharacteristic(
+        CHARACTERISTIC_UUID,
+        BLECharacteristic::PROPERTY_READ |
+            BLECharacteristic::PROPERTY_WRITE | // Crucial for receiving schedule
+            BLECharacteristic::PROPERTY_NOTIFY |
+            BLECharacteristic::PROPERTY_INDICATE);
+    pCharacteristic->setCallbacks(new MyCharacteristicCallbacks()); // Handle writes
+    pCharacteristic->addDescriptor(new BLE2902());                  // Needed for notifications
 
-  // Create the BLE Service
-  BLEService *pService = pServer->createService(SERVICE_UUID);
+    // Set initial characteristic value (optional)
+    pCharacteristic->setValue("Ready");
 
-  // Create a BLE Characteristic
-  pCharacteristic = pService->createCharacteristic(
-      CHARACTERISTIC_UUID,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_INDICATE);
-
-  // incoming writes
-  pCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
-
-  // Create a BLE Descriptor
-  pCharacteristic->addDescriptor(new BLE2902());
-
-  // Start the service
-  pService->start();
-
-  // Start advertising
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06); // functions that help with iPhone connections issue
-  pAdvertising->setMinPreferred(0x12);
-  BLEDevice::startAdvertising();
-  Serial.println("Waiting a client connection to notify...");
-
-  // JSON input string.
-  const char *json = "{\"sensor\":\"gps\",\"time\":1351824120,\"data\":[48.756080,2.302038]}";
-  delay(3000);
-  listDir(LittleFS, "/", 3);
-  createDir(LittleFS, "/mydir");
-  writeFile(LittleFS, "/mydir/hello.txt", json);
-  listDir(LittleFS, "/", 1);
-  readFile(LittleFS, "/mydir/hello.txt");
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);
+    pAdvertising->setMaxPreferred(0x12);
+    BLEDevice::startAdvertising(); // Start advertising initially
+    Serial.println("BLE Initialized. Waiting for connection or processing schedule...");
 }
 
+//==================== LOOP ====================//
 void loop()
 {
 
-  // check if the button is pressed
-  if (digitalRead(USER_PIN) == HIGH)
-  {
-    Serial.println("User 34 button pressed");
-    // notify changed value
-    digitalWrite(VIBRATION_PIN, HIGH);
-  }
-  else if (digitalRead(PAIR_PIN) == HIGH)
-  {
-    // Serial.println("User 23 button pressed");
-    // notify changed value
-    digitalWrite(VIBRATION_PIN, HIGH);
-  }
-  else
-  {
-    digitalWrite(VIBRATION_PIN, LOW);
-  }
+    // --- Handle Connection State Changes (Advertising) ---
+    // This logic is mostly handled by callbacks now, but keep advertising restart logic
+    if (!deviceConnected && oldDeviceConnected)
+    {
+        // onDisconnect callback handles LED and prints message
+        // It also restarts advertising
+        oldDeviceConnected = deviceConnected;
+    }
+    if (deviceConnected && !oldDeviceConnected)
+    {
+        // onConnect callback handles LED and prints message
+        oldDeviceConnected = deviceConnected;
+    }
 
-  EVERY_N_SECONDS(5)
-  {
-    // Serial.println("5 seconds passed");
-    // notify changed value
-    digitalWrite(VIBRATION_PIN, HIGH);
-  }
-  JsonDocument doc;
+    // --- Main State Machine ---
+    switch (currentState)
+    {
+    case STATE_IDLE:
+        // Waiting for connection or schedule via BLE write
+        // Or waiting for a command like "SEND_UPDATE" if implemented
+        // Low power mode could potentially be entered here if idle for long
+        break;
 
-  doc["med_id"] = "A";
-  doc["time"] = 1351824120;
-  doc["ala_time"][0] = 48.756080;
-  doc["ala_time"][1] = 2.302038;
+    case STATE_PROCESSING_SCHEDULE:
+        // Check the schedule for due reminders
+        processSchedule();
+        break;
 
-  serializeJson(doc, Serial);
+    case STATE_VIBRATING:
+        // Check if vibration duration has passed
+        if (millis() - stateTimer >= VIBRATION_DURATION_MS)
+        {
+            stopVibration();
+            stateTimer = millis(); // Start timer for response timeout
+            currentState = STATE_WAITING_RESPONSE;
+            Serial.println("State changed to STATE_WAITING_RESPONSE");
+        }
+        break;
 
-  // reset value on disconnection
-  if (!deviceConnected)
-  {
-    value = 0; // reset value if not connected
-  }
+    case STATE_WAITING_RESPONSE:
+        // Check for user button press
+        if (digitalRead(USER_PIN) == HIGH)
+        {
+            Serial.println("User button pressed - Responded YES");
+            recordResponse(true); // Records response, saves, moves to next, sets state back
+            // Debounce delay might be needed if button is bouncy
+            delay(200);
+        }
+        // Check for response timeout
+        else if (millis() - stateTimer >= RESPONSE_TIMEOUT_MS)
+        {
+            Serial.println("Response timeout - Responded NO");
+            recordResponse(false); // Records response, saves, moves to next, sets state back
+        }
+        break;
 
-  // notify changed value
-  if (deviceConnected)
-  {
+    case STATE_SENDING_UPDATE:
+        // Send the final schedule with responses
+        sendUpdate();
+        // sendUpdate() changes state back to IDLE after sending
+        break;
+    }
 
-    String str = "Hello from Pipli!" + String(value); // String to send
-    int str_len = str.length() + 1;
-
-    // Prepare the character array (the buffer)
-    char char_array[MTU]; // MTU
-
-    // Copy it over
-    str.toCharArray(char_array, str_len);
-    pCharacteristic->setValue(char_array); // to send a test message
-
-    pCharacteristic->notify(); // send the value to the app!
-
-    blinkLed();
-
-    value++;
-    delay(2000); // bluetooth stack will go into congestion, if too many packets are sent, in 6 hours test i was able to go as low as 3ms
-  }
-
-  // disconnecting
-  if (!deviceConnected && oldDeviceConnected)
-  {
-    // Set buildin LED to indicate disconnection
-    digitalWrite(LED, LOW);
-    delay(500);                  // give the bluetooth stack the chance to get things ready
-    pServer->startAdvertising(); // restart advertising
-    Serial.println("start advertising");
-    oldDeviceConnected = deviceConnected;
-  }
-  // connecting
-  if (deviceConnected && !oldDeviceConnected)
-  {
-    // do stuff here on connecting
-    oldDeviceConnected = deviceConnected;
-
-    // Set buildin LED to indicate connection
-    digitalWrite(LED, HIGH);
-  }
-}
+    // Small delay to prevent watchdog issues if loop is very fast
+    delay(10);
+} // End loop
