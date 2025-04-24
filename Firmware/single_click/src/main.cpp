@@ -648,8 +648,6 @@ void setup()
 
     // --- Initialize BLE ---
     BLEDevice::init("Pipli");
-    BLEDevice::setMTU(200);
-    Serial.println("Requested MTU: 200");
     pServer = BLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
     BLEService *pService = pServer->createService(SERVICE_UUID);
