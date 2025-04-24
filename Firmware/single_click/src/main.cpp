@@ -67,7 +67,9 @@ unsigned long scheduleReceiveTime = 0; // millis() when schedule was received/lo
 // --- Reminder Tracking ---
 int currentMedIndex = -1;
 int currentTimeIndex = -1;
-unsigned long stateTimer = 0; // Used for vibration duration and response timeout
+unsigned long stateTimer = 0;                // Used for vibration duration and response timeout
+unsigned long nextReminderDueTimeMillis = 0; // Stores the absolute time of the next reminder
+unsigned long lastCountdownPrintMillis = 0;  // Timer for printing countdown
 
 // -- -Function Prototypes-- -
 void blinkLed();
@@ -369,9 +371,12 @@ void processSchedule()
             Serial.println("State changed to STATE_VIBRATING");
         }
         // Else: An unprocessed reminder exists, but it's not time yet. Stay in PROCESSING state.
+        nextReminderDueTimeMillis = earliestDueTimeFound; // Store the time for the countdown
     }
     else
     {
+        nextReminderDueTimeMillis = 0; // Reset when no reminders are pending
+
         // No unprocessed reminders were found in the entire schedule.
         Serial.println("All medications processed.");
         if (deviceConnected)
@@ -703,6 +708,36 @@ void loop()
     case STATE_PROCESSING_SCHEDULE:
         // Check the schedule for due reminders
         processSchedule();
+
+        // --- Add Countdown Logic ---
+        if (millis() - lastCountdownPrintMillis >= 1000) // Print roughly every second
+        {
+            lastCountdownPrintMillis = millis();
+            if (nextReminderDueTimeMillis > 0) // Check if a reminder is actually scheduled
+            {
+                unsigned long now = millis();
+                if (nextReminderDueTimeMillis > now) // Ensure time hasn't passed
+                {
+                    unsigned long remainingMillis = nextReminderDueTimeMillis - now;
+                    unsigned long remainingSeconds = remainingMillis / 1000;
+                    Serial.printf("Next reminder in: %lu seconds\n", remainingSeconds);
+                }
+                else
+                {
+                    // Time has passed or is very close, processSchedule should handle state change soon
+                    // Serial.println("Next reminder is due now or very soon.");
+                }
+            }
+            else
+            {
+                // Only print "no pending" if schedule is actually loaded, otherwise it's just idle
+                if (scheduleLoaded)
+                {
+                    Serial.println("No pending reminders.");
+                }
+            }
+        }
+        // --- End Countdown Logic ---
         break;
 
     case STATE_VIBRATING:
