@@ -17,31 +17,46 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
-import { Profile, Medication, RelationToFood, PROFILES_STORAGE_KEY } from '@/types/pipli'; // Updated import
-// Assuming IconSymbol is correctly set up for these icons
-// import { IconSymbol } from '@/components/ui/IconSymbol';
-import { useBleContext } from '@/context/BleContext'; // Import the context hook
+import { MedicationTimeStatus, Profile, Medication, RelationToFood, PROFILES_STORAGE_KEY } from '@/types/pipli';
+import { useBleContext } from '@/context/BleContext';
+// Corrected import path assuming utils is at the root level relative to app
+import { prepareScheduleForDevice } from '@/utils/scheduleUtils';
+
 
 
 // Helper to ensure medication has all fields (for loading old data)
-const ensureMedicationDefaults = (med: Partial<Medication>): Medication => ({
-    id: med.id || Date.now().toString() + Math.random().toString(36).substring(2, 7),
-    name: med.name || 'Unknown',
-    dose: med.dose || '',
-    // Ensure 'times' is an array, default to empty if missing or not array
-    times: Array.isArray(med.times) ? med.times : [],
-    // Ensure 'durationDays' is a positive number, default to 1
-    durationDays: typeof med.durationDays === 'number' && med.durationDays > 0 ? med.durationDays : 1,
-    relationToFood: med.relationToFood || 'any',
-    notes: med.notes || '',
-});
+const ensureMedicationDefaults = (med: Partial<Medication>): Medication => {
+    const defaultTimes = Array.isArray(med.times) ? med.times : [];
+    // Initialize timeStatuses based on times, defaulting responded to false
+    const defaultTimeStatuses = defaultTimes.map(t => ({
+        time: t,
+        responded: false, // Default status
+    }));
 
-
+    return {
+        id: med.id || Date.now().toString() + Math.random().toString(36).substring(2, 7),
+        name: med.name || 'Unknown',
+        dose: med.dose || '',
+        times: defaultTimes,
+        // Initialize timeStatuses, merging with existing if present (for future flexibility)
+        timeStatuses: Array.isArray(med.timeStatuses)
+            ? defaultTimes.map(t => {
+                const existing = med.timeStatuses?.find(ts => ts.time === t);
+                return existing || { time: t, responded: false };
+            })
+            : defaultTimeStatuses,
+        durationDays: typeof med.durationDays === 'number' && med.durationDays > 0 ? med.durationDays : 1,
+        relationToFood: med.relationToFood || 'any',
+        notes: med.notes || '',
+    };
+};
 
 export default function ProfileDetailScreen() {
     const { id } = useLocalSearchParams<{ id: string }>();
     const router = useRouter();
-    const { connectedDevice, sendData } = useBleContext(); // Get BLE functions/state from context
+    // Get BLE functions/state from context
+    // Assuming BleContext provides receivedData and clearReceivedData for status updates
+    const { connectedDevice, sendData, receivedData, clearReceivedData } = useBleContext();
 
     const [profile, setProfile] = useState<Profile | null>(null);
     const [allProfiles, setAllProfiles] = useState<Profile[]>([]);
@@ -51,7 +66,6 @@ export default function ProfileDetailScreen() {
     // --- State for NEW medication inputs ---
     const [newMedName, setNewMedName] = useState('');
     const [newMedDose, setNewMedDose] = useState('');
-    // REMOVED: const [newMedTimeOfDay, setNewMedTimeOfDay] = useState('');
     const [newMedTimes, setNewMedTimes] = useState<string[]>([]); // Array to hold multiple times
     const [currentTimeInput, setCurrentTimeInput] = useState(''); // Input for adding a single time
     const [newMedDurationDays, setNewMedDurationDays] = useState<string>('1'); // Duration input (string)
@@ -76,6 +90,7 @@ export default function ProfileDetailScreen() {
                     const parsedProfiles: Profile[] = JSON.parse(storedProfiles);
                     const validatedProfiles = parsedProfiles.map(p => ({
                         ...p,
+                        // Ensure defaults are applied, including initializing timeStatuses
                         currentMedications: (p.currentMedications || []).map(ensureMedicationDefaults),
                         pastMedications: (p.pastMedications || []).map(ensureMedicationDefaults),
                     }));
@@ -119,6 +134,83 @@ export default function ProfileDetailScreen() {
         }
     };
 
+    // --- Effect to process received data from BLE ---
+    useEffect(() => {
+        if (receivedData && profile && id) { // Ensure profile and id are available
+            console.log("[ProfileDetailScreen] Received data:", receivedData);
+            try {
+                // Assuming receivedData is a JSON string like the example
+                // [{"med_id":"A","ref_time":"1678886400","times":[{"time":"5","responded":false},{"time":"30","responded":true}]}]
+                // NOTE: The 'time' field from device needs mapping if it's not the exact app time string.
+                // Assuming 'time' from device IS the exact time string like "8:00 AM" for now.
+                // If 'time' from device is offset/index, this logic needs adjustment.
+                const parsedData: Array<{ med_id: string; ref_time: string; times: Array<{ time: string; responded: boolean }> }> = JSON.parse(receivedData);
+
+                let profileWasUpdated = false;
+                const updatedMedications = profile.currentMedications.map((med, medIndex) => {
+                    // Determine the expected med_id ('A', 'B', ...) based on index
+                    // This assumes the device uses the same A, B, C... mapping based on the order sent
+                    const expectedDeviceMedId = String.fromCharCode(65 + medIndex); // 'A', 'B', ...
+
+                    // Find if this medication ID matches any in the received data
+                    const deviceDataForMed = parsedData.find(d => d.med_id === expectedDeviceMedId);
+
+                    if (deviceDataForMed) {
+                        console.log(`[ProfileDetailScreen] Found matching data for med ID: ${expectedDeviceMedId} (App Med: ${med.name})`);
+                        let medicationUpdated = false;
+
+                        // Ensure timeStatuses exists and is initialized
+                        const currentTimeStatuses = med.timeStatuses && med.timeStatuses.length === med.times.length
+                            ? med.timeStatuses
+                            : med.times.map(t => ({ time: t, responded: false })); // Initialize if missing/mismatched
+
+                        const newTimeStatuses = currentTimeStatuses.map(status => {
+                            // Find the corresponding time update from the device
+                            // *** CRITICAL ASSUMPTION ***:
+                            // Assumes the `time` string from the device payload DIRECTLY matches `status.time` ("8:00 AM").
+                            // If the device sends offsets or indices, this lookup needs to change drastically.
+                            const deviceTimeUpdate = deviceDataForMed.times.find(t => t.time === status.time);
+
+                            if (deviceTimeUpdate && status.responded !== deviceTimeUpdate.responded) {
+                                console.log(`[ProfileDetailScreen] Updating status for med ${med.name}, time ${status.time} to ${deviceTimeUpdate.responded}`);
+                                medicationUpdated = true;
+                                return { ...status, responded: deviceTimeUpdate.responded };
+                            }
+                            return status; // No update for this time
+                        });
+
+                        if (medicationUpdated) {
+                            profileWasUpdated = true;
+                            return { ...med, timeStatuses: newTimeStatuses };
+                        }
+                    } else {
+                        console.log(`[ProfileDetailScreen] No matching device data found for expected med_id: ${expectedDeviceMedId} (App Med: ${med.name})`);
+                    }
+                    return med; // No update for this medication
+                });
+
+                if (profileWasUpdated) {
+                    console.log("[ProfileDetailScreen] Profile updated with device status.");
+                    const updatedProfile = { ...profile, currentMedications: updatedMedications };
+                    // Update all profiles state and save
+                    const updatedAllProfiles = allProfiles.map(p => p.id === id ? updatedProfile : p);
+                    saveAllProfiles(updatedAllProfiles); // This already calls setProfile internally
+                } else {
+                    console.log("[ProfileDetailScreen] Received data did not result in profile updates.");
+                }
+
+            } catch (error) {
+                console.error("[ProfileDetailScreen] Failed to parse or process received BLE data:", error);
+                Alert.alert("Data Error", "Received invalid data from the device.");
+            } finally {
+                // Signal that we've processed the data (important to prevent re-processing)
+                clearReceivedData?.(); // Use optional chaining
+            }
+        }
+        // Add clearReceivedData and other necessary dependencies
+    }, [receivedData, profile, allProfiles, id, saveAllProfiles, clearReceivedData]);
+
+
     // --- Reset New Medication Form ---
     const resetNewMedForm = () => {
         setNewMedName('');
@@ -131,17 +223,18 @@ export default function ProfileDetailScreen() {
     };
 
     const handleAddTimeToList = () => {
-        const timeToAdd = currentTimeInput.trim();
-        if (!timeToAdd) {
-            Alert.alert("Invalid Time", "Please enter a time to add.");
+        const timeToAdd = currentTimeInput.trim().toUpperCase(); // Standardize format slightly
+        // Basic validation (e.g., HH:MM AM/PM) - more robust validation recommended
+        const timeRegex = /^(0?[1-9]|1[0-2]):[0-5][0-9]\s*(AM|PM)$/i;
+        if (!timeToAdd || !timeRegex.test(timeToAdd)) {
+            Alert.alert("Invalid Time Format", "Please enter time in HH:MM AM/PM format (e.g., 8:00 AM, 10:30 PM).");
             return;
         }
-        // Optional: Basic format check or prevent duplicates
         if (newMedTimes.includes(timeToAdd)) {
             Alert.alert("Duplicate Time", "This time has already been added.");
             return;
         }
-        setNewMedTimes([...newMedTimes, timeToAdd]);
+        setNewMedTimes([...newMedTimes, timeToAdd].sort()); // Keep times sorted
         setCurrentTimeInput(''); // Clear the input field
     };
 
@@ -159,7 +252,7 @@ export default function ProfileDetailScreen() {
 
         // Validate required fields
         if (!medName || !medDose || newMedTimes.length === 0 || !durationString || !profile) {
-            Alert.alert('Missing Information', 'Please enter name, dose, at least one time, and duration.');
+            Alert.alert('Missing Information', 'Please enter name, dose, at least one time (HH:MM AM/PM), and duration.');
             return;
         }
 
@@ -175,11 +268,15 @@ export default function ProfileDetailScreen() {
             return;
         }
 
+        // Initialize timeStatuses when adding
+        const newMedTimeStatuses = newMedTimes.map(time => ({ time: time, responded: false }));
+
         const newMed: Medication = {
             id: Date.now().toString() + Math.random().toString(36).substring(2, 7),
             name: medName,
             dose: medDose,
             times: newMedTimes, // Use the array of times
+            timeStatuses: newMedTimeStatuses, // Initialize statuses
             durationDays: durationNum, // Use the parsed number
             relationToFood: newMedRelationToFood,
             notes: newMedNotes.trim() || undefined,
@@ -187,7 +284,8 @@ export default function ProfileDetailScreen() {
 
         const updatedProfile = {
             ...profile,
-            currentMedications: [...profile.currentMedications, newMed],
+            // Ensure ensureMedicationDefaults is applied to the new med as well for consistency
+            currentMedications: [...profile.currentMedications, ensureMedicationDefaults(newMed)],
         };
 
         const updatedAllProfiles = allProfiles.map(p => p.id === id ? updatedProfile : p);
@@ -203,12 +301,18 @@ export default function ProfileDetailScreen() {
         const medToMove = profile.currentMedications.find(m => m.id === medicationId);
         if (!medToMove) return;
 
-        const alreadyInPast = profile.pastMedications.some(m => m.name.toLowerCase() === medToMove.name.toLowerCase());
+        // Ensure defaults are applied when moving to past as well
+        const medToMoveWithDefaults = ensureMedicationDefaults(medToMove);
+
+        const alreadyInPast = profile.pastMedications.some(m => m.name.toLowerCase() === medToMoveWithDefaults.name.toLowerCase());
 
         const updatedProfile = {
             ...profile,
             currentMedications: profile.currentMedications.filter(m => m.id !== medicationId),
-            pastMedications: alreadyInPast ? profile.pastMedications : [...profile.pastMedications, medToMove],
+            // Add to past only if not already there by name (or use ID if names aren't unique)
+            pastMedications: alreadyInPast
+                ? profile.pastMedications // Keep existing past list if name matches
+                : [...profile.pastMedications, medToMoveWithDefaults], // Add the ensured med
         };
 
         const updatedAllProfiles = allProfiles.map(p => p.id === id ? updatedProfile : p);
@@ -275,17 +379,34 @@ export default function ProfileDetailScreen() {
         );
     };
 
-    // --- Render Helper for Medication Item Display (Updated) ---
+    // --- Render Helper for Medication Item Display (Updated with Status) ---
     const renderMedicationDetails = (med: Medication) => (
         <View style={styles.medDetailsContainer}>
             <ThemedText style={styles.medDetailText}>
                 <ThemedText style={styles.medDetailLabel}>Dose:</ThemedText> {med.dose}
             </ThemedText>
-            {/* Display multiple times */}
-            <ThemedText style={styles.medDetailText}>
-                <ThemedText style={styles.medDetailLabel}>Times:</ThemedText> {med.times.join(', ')}
-            </ThemedText>
-            {/* Display duration */}
+
+            {/* Display multiple times WITH status */}
+            <View style={styles.timesListContainer}>
+                <ThemedText style={styles.medDetailLabel}>Times:</ThemedText>
+                {/* Ensure we use timeStatuses, falling back to initializing from times if needed */}
+                {(med.timeStatuses && med.timeStatuses.length > 0 ? med.timeStatuses : med.times.map(t => ({ time: t, responded: false }))).map((status, index) => (
+                    <View key={index} style={styles.timeEntry}>
+                        <Text style={styles.timeText}> - {status.time}</Text>
+                        {/* Display status indicator */}
+                        {status.responded ? (
+                            <Text style={styles.statusIndicatorYes}> (Taken ✔)</Text>
+                        ) : (
+                            <Text style={styles.statusIndicatorNo}> (Missed ✖)</Text>
+                        )}
+                    </View>
+                ))}
+                {/* Fallback if only times exist (old data?) */}
+                {(!med.timeStatuses || med.timeStatuses.length === 0) && med.times.length > 0 && (
+                    <ThemedText style={styles.medDetailText}> {med.times.join(', ')} (Status unavailable)</ThemedText>
+                )}
+            </View>
+
             <ThemedText style={styles.medDetailText}>
                 <ThemedText style={styles.medDetailLabel}>Duration:</ThemedText> {med.durationDays} day{med.durationDays !== 1 ? 's' : ''}
             </ThemedText>
@@ -300,36 +421,36 @@ export default function ProfileDetailScreen() {
         </View>
     );
 
-    // --- NEW: Handler to Send Schedule ---
+    // --- Handler to Send Schedule (Updated to use prepareScheduleForDevice) ---
     const handleSendSchedule = async () => {
         if (!connectedDevice) {
             Alert.alert("Not Connected", "Please connect to the Pipli device first via the 'Connect' tab.");
             return;
         }
-        if (!profile || !profile.currentMedications) {
-            Alert.alert("Error", "Profile data or medication list is not available.");
+        if (!profile || !profile.currentMedications || profile.currentMedications.length === 0) {
+            Alert.alert("No Schedule", "There are no current medications to send.");
             return;
         }
 
-        // Prepare the data payload with new structure
-        const scheduleData = profile.currentMedications.map(med => ({
-            name: med.name,
-            dose: med.dose,
-            times: med.times, // Send the array
-            durationDays: med.durationDays, // Send the number
-            relationToFood: med.relationToFood,
-            notes: med.notes || "",
-        }));
-
-        // Convert to JSON string
-        const jsonPayload = JSON.stringify(scheduleData);
-
-        console.log(`[handleSendSchedule] Sending payload (${jsonPayload.length} bytes):`, jsonPayload);
         setIsSendingSchedule(true);
         try {
+            // Prepare the data using the utility function
+            // Uses short IDs ('A', 'B', ...) and calculates second offsets by default
+            const scheduleJsonString = prepareScheduleForDevice(profile.currentMedications);
+
+            if (!scheduleJsonString || scheduleJsonString === '[]') {
+                console.log("Could not generate schedule payload or no valid medications found.");
+                Alert.alert("Schedule Error", "Could not prepare the schedule. Ensure medications have valid times (HH:MM AM/PM).");
+                setIsSendingSchedule(false);
+                return;
+            }
+
+            console.log(`[handleSendSchedule] Sending payload (${scheduleJsonString.length} bytes):`, scheduleJsonString);
+
             // Use the sendData function from the context
-            await sendData(jsonPayload);
+            await sendData(scheduleJsonString);
             Alert.alert("Success", "Medication schedule sent to the Pipli device.");
+
         } catch (error: any) {
             console.error("[handleSendSchedule] Failed to send schedule:", error);
             Alert.alert("Send Error", `Failed to send schedule: ${error.message || 'Unknown error'}`);
@@ -380,7 +501,7 @@ export default function ProfileDetailScreen() {
                         <TextInput style={styles.textInput} placeholder="e.g., 1 tablet, 500mg" value={newMedDose} onChangeText={setNewMedDose} placeholderTextColor="#aaa" />
                     </View>
                     <View style={styles.inputGroup}>
-                        <ThemedText style={styles.inputLabel}>Times to Take (add one by one):</ThemedText>
+                        <ThemedText style={styles.inputLabel}>Times to Take (HH:MM AM/PM):</ThemedText>
                         <View style={styles.addTimeContainer}>
                             <TextInput
                                 style={styles.timeInput}
@@ -388,6 +509,7 @@ export default function ProfileDetailScreen() {
                                 value={currentTimeInput}
                                 onChangeText={setCurrentTimeInput}
                                 placeholderTextColor="#aaa"
+                                autoCapitalize="characters" // Help with AM/PM
                             />
                             <TouchableOpacity onPress={handleAddTimeToList} style={styles.addTimeButton}>
                                 <Text style={styles.addTimeButtonText}>Add Time</Text>
@@ -400,9 +522,7 @@ export default function ProfileDetailScreen() {
                                     <View key={index} style={styles.addedTimeChip}>
                                         <Text style={styles.addedTimeText}>{time}</Text>
                                         <TouchableOpacity onPress={() => handleRemoveTimeFromList(time)} style={styles.removeTimeButton}>
-                                            {/* Use IconSymbol if available */}
                                             <Text style={styles.removeTimeButtonText}>✕</Text>
-                                            {/* <IconSymbol name="xmark.circle.fill" size={16} color="#fff" /> */}
                                         </TouchableOpacity>
                                     </View>
                                 ))}
@@ -437,14 +557,13 @@ export default function ProfileDetailScreen() {
                         profile.currentMedications.map((med, index) => (
                             <View key={med.id} style={[styles.medCard, index > 0 && styles.medCardMargin]}>
                                 <ThemedText style={styles.medNameHeader}>{med.name}</ThemedText>
+                                {/* Use the updated renderer */}
                                 {renderMedicationDetails(med)}
                                 <View style={styles.medActions}>
                                     <TouchableOpacity onPress={() => handleMoveMedicationToPast(med.id)} style={styles.medActionButton}>
-                                        {/* <IconSymbol name="checkmark.circle.fill" size={20} color="green" /> */}
                                         <ThemedText style={styles.medActionTextMarkPast}>Mark as Past</ThemedText>
                                     </TouchableOpacity>
                                     <TouchableOpacity onPress={() => handleDeleteMedication(med.id, 'current')} style={styles.medActionButton}>
-                                        {/* <IconSymbol name="trash.fill" size={20} color="#FF3B30" /> */}
                                         <ThemedText style={styles.medActionTextDelete}>Delete</ThemedText>
                                     </TouchableOpacity>
                                 </View>
@@ -461,10 +580,10 @@ export default function ProfileDetailScreen() {
                             profile.pastMedications.map((med, index) => (
                                 <View key={med.id} style={[styles.medCard, styles.pastMedCard, index > 0 && styles.medCardMargin]}>
                                     <ThemedText style={[styles.medNameHeader, styles.pastMedNameHeader]}>{med.name}</ThemedText>
+                                    {/* Use the updated renderer (will show status if available, otherwise just times) */}
                                     {renderMedicationDetails(med)}
                                     <View style={styles.medActions}>
                                         <TouchableOpacity onPress={() => handleDeleteMedication(med.id, 'past')} style={styles.medActionButton}>
-                                            {/* <IconSymbol name="trash.fill" size={20} color="#FF3B30" /> */}
                                             <ThemedText style={styles.medActionTextDelete}>Delete</ThemedText>
                                         </TouchableOpacity>
                                     </View>
@@ -473,14 +592,13 @@ export default function ProfileDetailScreen() {
                         )}
                 </ThemedView>
 
-                {/* --- NEW: Send Schedule Section --- */}
+                {/* --- Send Schedule Section (Uses updated handler) --- */}
                 <ThemedView style={styles.section}>
                     <ThemedText type="subtitle" style={styles.sectionHeader}>Sync with Device</ThemedText>
                     <TouchableOpacity
-                        onPress={handleSendSchedule}
+                        onPress={handleSendSchedule} // Uses the updated handler
                         style={[
                             styles.syncButton,
-                            // Disable button if not connected or already sending
                             (!connectedDevice || isSendingSchedule) && styles.syncButtonDisabled
                         ]}
                         disabled={!connectedDevice || isSendingSchedule}
@@ -509,196 +627,141 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     // Input Styles
-    inputGroup: { marginBottom: 15, }, // Increased spacing
+    inputGroup: { marginBottom: 15, },
     inputLabel: { fontSize: 15, fontWeight: '500', color: '#444', marginBottom: 6, },
     textInput: {
-        height: 44, // Standard height
-        borderColor: '#ccc', borderWidth: 1, borderRadius: 8, // Slightly more rounded
+        height: 44, borderColor: '#ccc', borderWidth: 1, borderRadius: 8,
         paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 16, color: '#333',
     },
     notesInput: { height: 80, textAlignVertical: 'top', paddingTop: 10, },
     scrollContent: {
-        padding: 15, // Use slightly less padding for scroll content
-        paddingBottom: 40,
+        padding: 15, paddingBottom: 40,
     },
     centered: {
-        flex: 1,
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: 20,
+        flex: 1, justifyContent: 'center', alignItems: 'center', padding: 20,
     },
     backButton: {
-        marginTop: 20,
-        backgroundColor: '#007AFF',
-        paddingVertical: 10,
-        paddingHorizontal: 20,
-        borderRadius: 8,
+        marginTop: 20, backgroundColor: '#007AFF', paddingVertical: 10,
+        paddingHorizontal: 20, borderRadius: 8,
     },
     backButtonText: {
-        color: 'white',
-        fontSize: 16,
-        fontWeight: 'bold',
+        color: 'white', fontSize: 16, fontWeight: 'bold',
     },
     section: {
-        marginBottom: 20,
-        padding: 15,
-        backgroundColor: 'rgba(255, 255, 255, 0.95)', // Slightly more opaque
-        borderRadius: 10,
-        shadowColor: "#000",
-        shadowOffset: { width: 0, height: 1 },
-        shadowOpacity: 0.1,
-        shadowRadius: 2,
-        elevation: 2,
+        marginBottom: 20, padding: 15, backgroundColor: 'rgba(255, 255, 255, 0.95)',
+        borderRadius: 10, shadowColor: "#000", shadowOffset: { width: 0, height: 1 },
+        shadowOpacity: 0.1, shadowRadius: 2, elevation: 2,
     },
     sectionHeader: {
-        marginBottom: 15,
-        borderBottomWidth: 1,
-        borderBottomColor: '#eee',
-        paddingBottom: 8,
+        marginBottom: 15, borderBottomWidth: 1, borderBottomColor: '#eee', paddingBottom: 8,
     },
     // Relation to Food Selector
-    relationSelector: {
-        // Styles for the container if needed, uses inputGroup margin
-    },
     relationButtons: {
-        flexDirection: 'row',
-        flexWrap: 'wrap', // Allow buttons to wrap
-        gap: 8,
+        flexDirection: 'row', flexWrap: 'wrap', gap: 8,
     },
     relationButton: {
-        paddingVertical: 8,
-        paddingHorizontal: 12,
-        borderWidth: 1,
-        borderColor: '#007AFF',
-        borderRadius: 15, // More rounded buttons
-        backgroundColor: '#fff',
+        paddingVertical: 8, paddingHorizontal: 12, borderWidth: 1,
+        borderColor: '#007AFF', borderRadius: 15, backgroundColor: '#fff',
     },
     relationButtonSelected: {
         backgroundColor: '#007AFF',
     },
     relationButtonText: {
-        color: '#007AFF',
-        fontSize: 14,
-        fontWeight: '500',
+        color: '#007AFF', fontSize: 14, fontWeight: '500',
     },
     relationButtonTextSelected: {
         color: '#fff',
     },
     // Add Medication Button
     addMedButton: {
-        backgroundColor: '#34C759',
-        paddingVertical: 12,
-        paddingHorizontal: 20,
-        borderRadius: 8,
-        alignItems: 'center',
-        marginTop: 10, // Add margin above button
+        backgroundColor: '#34C759', paddingVertical: 12, paddingHorizontal: 20,
+        borderRadius: 8, alignItems: 'center', marginTop: 10,
     },
     addMedButtonText: {
-        color: 'white',
-        fontSize: 16,
-        fontWeight: 'bold',
+        color: 'white', fontSize: 16, fontWeight: 'bold',
     },
     // Medication List Styles
     noMedsText: {
-        fontStyle: 'italic',
-        color: '#888',
-        fontSize: 14,
-        textAlign: 'center',
-        paddingVertical: 15,
+        fontStyle: 'italic', color: '#888', fontSize: 14, textAlign: 'center', paddingVertical: 15,
     },
     medCard: {
-        backgroundColor: '#fff', // White background for med card
-        borderRadius: 6,
-        padding: 12,
-        borderWidth: 1,
-        borderColor: '#e8e8e8',
+        backgroundColor: '#fff', borderRadius: 6, padding: 12,
+        borderWidth: 1, borderColor: '#e8e8e8',
     },
     medCardMargin: {
-        marginTop: 10, // Space between medication cards
+        marginTop: 10,
     },
     pastMedCard: {
-        backgroundColor: '#f8f8f8', // Slightly different background for past meds
-        borderColor: '#ddd',
+        backgroundColor: '#f8f8f8', borderColor: '#ddd',
     },
     medNameHeader: {
-        fontSize: 17,
-        fontWeight: '600',
-        marginBottom: 8,
-        paddingBottom: 5,
-        borderBottomWidth: 1,
-        borderBottomColor: '#f0f0f0',
+        fontSize: 17, fontWeight: '600', marginBottom: 8, paddingBottom: 5,
+        borderBottomWidth: 1, borderBottomColor: '#f0f0f0',
     },
     pastMedNameHeader: {
-        color: '#666',
-        textDecorationLine: 'line-through',
+        color: '#666', textDecorationLine: 'line-through',
     },
     medDetailsContainer: {
-        marginBottom: 10, // Space between details and actions
-        gap: 4, // Space between detail lines
+        marginBottom: 10, gap: 6, // Increased gap slightly
     },
     medDetailText: {
-        fontSize: 15,
-        color: '#333',
+        fontSize: 15, color: '#333',
     },
     medDetailLabel: {
-        fontWeight: '500',
-        color: '#555',
+        fontWeight: '500', color: '#555',
     },
+    // Styles for displaying times with status
+    timesListContainer: {
+        marginTop: 2, // Small space above times list
+    },
+    timeEntry: {
+        flexDirection: 'row', alignItems: 'center', marginLeft: 10, // Indent time entries slightly
+        marginBottom: 2, // Space between time entries
+    },
+    timeText: {
+        fontSize: 15, color: '#333',
+    },
+    statusIndicatorYes: {
+        fontSize: 14, color: 'green', fontWeight: 'bold', marginLeft: 5,
+    },
+    statusIndicatorNo: {
+        fontSize: 14, color: '#FF3B30', // Red color for missed
+        fontWeight: 'bold', marginLeft: 5,
+    },
+    // --- End Status Styles ---
     medActions: {
-        flexDirection: 'row',
-        justifyContent: 'flex-end', // Align actions to the right
-        gap: 15,
-        marginTop: 5,
-        paddingTop: 8,
-        borderTopWidth: 1,
-        borderTopColor: '#f0f0f0',
+        flexDirection: 'row', justifyContent: 'flex-end', gap: 15,
+        marginTop: 5, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#f0f0f0',
     },
     medActionButton: {
-        paddingVertical: 4,
-        paddingHorizontal: 6,
+        paddingVertical: 4, paddingHorizontal: 6,
     },
     medActionTextMarkPast: {
-        color: 'green',
-        fontSize: 14,
-        fontWeight: '500',
+        color: 'green', fontSize: 14, fontWeight: '500',
     },
     medActionTextDelete: {
-        color: '#FF3B30',
-        fontSize: 14,
-        fontWeight: '500',
+        color: '#FF3B30', fontSize: 14, fontWeight: '500',
     },
     syncButton: {
-        backgroundColor: '#FF9500', // Orange color for sync action
-        paddingVertical: 14,
-        paddingHorizontal: 20,
-        borderRadius: 8,
-        alignItems: 'center',
-        marginTop: 10,
+        backgroundColor: '#FF9500', paddingVertical: 14, paddingHorizontal: 20,
+        borderRadius: 8, alignItems: 'center', marginTop: 10,
     },
     syncButtonDisabled: {
-        backgroundColor: '#aaa', // Grey out when disabled
+        backgroundColor: '#aaa',
     },
     syncButtonText: {
-        color: 'white',
-        fontSize: 16,
-        fontWeight: 'bold',
+        color: 'white', fontSize: 16, fontWeight: 'bold',
     },
     syncInfoText: {
-        textAlign: 'center',
-        marginTop: 10,
-        fontSize: 14,
-        color: '#666',
+        textAlign: 'center', marginTop: 10, fontSize: 14, color: '#666',
     },
     addTimeContainer: { flexDirection: 'row', alignItems: 'center', gap: 8, },
     timeInput: {
-        flex: 1, // Take available space
-        height: 44, borderColor: '#ccc', borderWidth: 1, borderRadius: 8,
+        flex: 1, height: 44, borderColor: '#ccc', borderWidth: 1, borderRadius: 8,
         paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 16, color: '#333',
     },
     addTimeButton: {
-        backgroundColor: '#5ac8fa', // Light blue for adding time
-        paddingVertical: 11, // Match input height roughly
-        paddingHorizontal: 15, borderRadius: 8,
+        backgroundColor: '#5ac8fa', paddingVertical: 11, paddingHorizontal: 15, borderRadius: 8,
     },
     addTimeButtonText: { color: 'white', fontSize: 14, fontWeight: 'bold', },
     addedTimesContainer: {
