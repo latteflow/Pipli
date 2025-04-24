@@ -14,6 +14,8 @@
 // JSON data library
 #include <ArduinoJson.h>
 
+#include <algorithm> // Needed for std::min
+
 #define FORMAT_LITTLEFS_IF_FAILED true
 #define SCHEDULE_FILENAME "/schedule.json"
 
@@ -21,6 +23,10 @@ BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
 bool deviceConnected = false;
 bool oldDeviceConnected = false;
+
+// --- BLE Chunking Settings ---
+const size_t BLE_CHUNK_SIZE = 20;
+const int BLE_CHUNK_DELAY_MS = 30; // Delay between sending chunks (adjust as needed)
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -448,6 +454,7 @@ void sendUpdate(bool changeStateToIdleOnSuccess) // Add parameter with default t
     {
         Serial.println("Cannot send update: Device not connected. Update pending.");
         // Don't change state here regardless of the parameter, just return.
+        // If called from STATE_SENDING_UPDATE, the state machine loop will handle moving to IDLE.
         return; // Exit without sending
     }
 
@@ -463,16 +470,41 @@ void sendUpdate(bool changeStateToIdleOnSuccess) // Add parameter with default t
     // --- Proceed with sending ---
     Serial.println("Serializing updated schedule...");
     String outputJson;
+    // Use compact serialization for BLE to save space
     serializeJson(scheduleDoc, outputJson);
 
-    Serial.print("Sending Update: ");
-    Serial.println(outputJson.c_str());
+    Serial.print("Sending Update (total size ");
+    Serial.print(outputJson.length());
+    Serial.println(" bytes):");
+    // Serial.println(outputJson.c_str()); // Optionally print full JSON for debug
 
-    pCharacteristic->setValue(outputJson.c_str());
-    pCharacteristic->notify();
-    blinkLed(); // Blink on send
+    // --- Chunking Logic ---
+    size_t totalLength = outputJson.length();
+    for (size_t i = 0; i < totalLength; i += BLE_CHUNK_SIZE)
+    {
+        size_t chunkLen = std::min((size_t)BLE_CHUNK_SIZE, totalLength - i);
+        // Use Arduino String's substring method
+        String chunkStr = outputJson.substring(i, i + chunkLen);
 
-    Serial.println("Update sent successfully.");
+        Serial.printf("  Sending chunk %d/%d (%d bytes)\n", //: %s\n", // Optionally print chunk content
+                      (i / BLE_CHUNK_SIZE) + 1,
+                      (totalLength + BLE_CHUNK_SIZE - 1) / BLE_CHUNK_SIZE,
+                      chunkLen
+                      //,chunkStr.c_str() // Uncomment to see chunk content
+        );
+
+        // Set value using uint8_t pointer and length
+        pCharacteristic->setValue((uint8_t *)chunkStr.c_str(), chunkLen);
+        pCharacteristic->notify();
+
+        // IMPORTANT: Delay between chunks
+        delay(BLE_CHUNK_DELAY_MS);
+    }
+    // --- End Chunking Logic ---
+
+    blinkLed(); // Blink once after all chunks are sent
+
+    Serial.println("Update sending process complete.");
 
     // --- MODIFIED State Change Logic ---
     if (changeStateToIdleOnSuccess)
@@ -484,6 +516,7 @@ void sendUpdate(bool changeStateToIdleOnSuccess) // Add parameter with default t
     {
         // If called for an intermediate update, just log it and DO NOT change state.
         Serial.println("Intermediate update sent. State remains unchanged.");
+        // The caller (e.g., the onWrite callback) is responsible for managing the state.
     }
     // --- End MODIFIED State Change Logic ---
 }
@@ -615,6 +648,8 @@ void setup()
 
     // --- Initialize BLE ---
     BLEDevice::init("Pipli");
+    BLEDevice::setMTU(200);
+    Serial.println("Requested MTU: 200");
     pServer = BLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
     BLEService *pService = pServer->createService(SERVICE_UUID);
