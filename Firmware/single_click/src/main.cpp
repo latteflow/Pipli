@@ -36,7 +36,7 @@ bool oldDeviceConnected = false;
 #define BLINK_DURATION_MS 50 // How long the LED stays on during a blink
 
 // --- Reminder System Settings ---
-#define VIBRATION_DURATION_MS 2000 // How long to vibrate for a reminder
+#define VIBRATION_DURATION_MS 5000 // How long to vibrate for a reminder
 #define RESPONSE_TIMEOUT_MS 15000  // How long to wait for user input after vibration
 
 #define UPDATE_REQUEST_CMD "SEND_UPDATE"
