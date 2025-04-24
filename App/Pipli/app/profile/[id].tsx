@@ -14,15 +14,23 @@ import {
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+// Import the date picker library
+import DatePicker from 'react-native-date-picker';
 
 import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 import { MedicationTimeStatus, Profile, Medication, RelationToFood, PROFILES_STORAGE_KEY } from '@/types/pipli';
 import { useBleContext } from '@/context/BleContext';
-// Corrected import path assuming utils is at the root level relative to app
 import { prepareScheduleForDevice } from '@/utils/scheduleUtils';
 
-
+// Helper to format Date object to HH:MM AM/PM string
+const formatTime = (date: Date): string => {
+    return date.toLocaleTimeString('en-US', {
+        hour: 'numeric', // Use 'numeric' or '2-digit'
+        minute: '2-digit',
+        hour12: true, // Force AM/PM
+    }).toUpperCase(); // Match the previous format expectation
+};
 
 // Helper to ensure medication has all fields (for loading old data)
 const ensureMedicationDefaults = (med: Partial<Medication>): Medication => {
@@ -67,10 +75,13 @@ export default function ProfileDetailScreen() {
     const [newMedName, setNewMedName] = useState('');
     const [newMedDose, setNewMedDose] = useState('');
     const [newMedTimes, setNewMedTimes] = useState<string[]>([]); // Array to hold multiple times
-    const [currentTimeInput, setCurrentTimeInput] = useState(''); // Input for adding a single time
-    const [newMedDurationDays, setNewMedDurationDays] = useState<string>('1'); // Duration input (string)
+    // REMOVED: const [currentTimeInput, setCurrentTimeInput] = useState('');
+    const [newMedDurationDays, setNewMedDurationDays] = useState<string>('1');
     const [newMedRelationToFood, setNewMedRelationToFood] = useState<RelationToFood>('any');
     const [newMedNotes, setNewMedNotes] = useState('');
+    // --- NEW State for Time Picker ---
+    const [isTimePickerVisible, setIsTimePickerVisible] = useState(false);
+    const [pickerDate, setPickerDate] = useState(new Date()); // Holds the date for the picker modal
     // ---
 
     // --- Load ALL profiles and find the current one ---
@@ -216,33 +227,29 @@ export default function ProfileDetailScreen() {
         setNewMedName('');
         setNewMedDose('');
         setNewMedTimes([]); // Reset times array
-        setCurrentTimeInput(''); // Reset current time input
-        setNewMedDurationDays('1'); // Reset duration
+
+        setNewMedDurationDays('1');
         setNewMedRelationToFood('any');
         setNewMedNotes('');
+        setIsTimePickerVisible(false); // Ensure picker is closed on reset
     };
 
-    const handleAddTimeToList = () => {
-        const timeToAdd = currentTimeInput.trim().toUpperCase(); // Standardize format slightly
-        // Basic validation (e.g., HH:MM AM/PM) - more robust validation recommended
-        const timeRegex = /^(0?[1-9]|1[0-2]):[0-5][0-9]\s*(AM|PM)$/i;
-        if (!timeToAdd || !timeRegex.test(timeToAdd)) {
-            Alert.alert("Invalid Time Format", "Please enter time in HH:MM AM/PM format (e.g., 8:00 AM, 10:30 PM).");
-            return;
-        }
+    // --- Add Time using the Picker ---
+    const handleConfirmTime = (selectedDate: Date) => {
+        setIsTimePickerVisible(false); // Close the picker first
+        const timeToAdd = formatTime(selectedDate); // Format the selected time
+
         if (newMedTimes.includes(timeToAdd)) {
             Alert.alert("Duplicate Time", "This time has already been added.");
             return;
         }
-        setNewMedTimes([...newMedTimes, timeToAdd].sort()); // Keep times sorted
-        setCurrentTimeInput(''); // Clear the input field
+        setNewMedTimes(prevTimes => [...prevTimes, timeToAdd].sort()); // Add and sort
     };
 
     // --- Remove Time from the list for the new medication ---
     const handleRemoveTimeFromList = (timeToRemove: string) => {
         setNewMedTimes(newMedTimes.filter(time => time !== timeToRemove));
     };
-
 
     // --- Add Medication Handler (Updated) ---
     const handleAddMedication = () => {
@@ -296,6 +303,7 @@ export default function ProfileDetailScreen() {
 
     // --- Move Medication to Past ---
     const handleMoveMedicationToPast = (medicationId: string) => {
+        // ... (logic remains the same)
         if (!profile) return;
 
         const medToMove = profile.currentMedications.find(m => m.id === medicationId);
@@ -321,6 +329,7 @@ export default function ProfileDetailScreen() {
 
     // --- Delete Medication ---
     const handleDeleteMedication = (medicationId: string, listType: 'current' | 'past') => {
+        // ... (logic remains the same)
         if (!profile) return;
 
         Alert.alert(
@@ -350,8 +359,10 @@ export default function ProfileDetailScreen() {
         );
     };
 
+
     // --- Render Helper for RelationToFood Buttons ---
     const renderRelationToFoodSelector = () => {
+        // ... (logic remains the same)
         const options: RelationToFood[] = ['before', 'after', 'with', 'any'];
         return (
             <View style={styles.inputGroup}>
@@ -500,21 +511,14 @@ export default function ProfileDetailScreen() {
                         <ThemedText style={styles.inputLabel}>Dose:</ThemedText>
                         <TextInput style={styles.textInput} placeholder="e.g., 1 tablet, 500mg" value={newMedDose} onChangeText={setNewMedDose} placeholderTextColor="#aaa" />
                     </View>
+                    {/* --- UPDATED Time Input Section --- */}
                     <View style={styles.inputGroup}>
-                        <ThemedText style={styles.inputLabel}>Times to Take (HH:MM AM/PM):</ThemedText>
-                        <View style={styles.addTimeContainer}>
-                            <TextInput
-                                style={styles.timeInput}
-                                placeholder="e.g., 8:00 AM"
-                                value={currentTimeInput}
-                                onChangeText={setCurrentTimeInput}
-                                placeholderTextColor="#aaa"
-                                autoCapitalize="characters" // Help with AM/PM
-                            />
-                            <TouchableOpacity onPress={handleAddTimeToList} style={styles.addTimeButton}>
-                                <Text style={styles.addTimeButtonText}>Add Time</Text>
-                            </TouchableOpacity>
-                        </View>
+                        <ThemedText style={styles.inputLabel}>Times to Take:</ThemedText>
+                        {/* Button to open the time picker */}
+                        <TouchableOpacity onPress={() => setIsTimePickerVisible(true)} style={styles.selectTimeButton}>
+                            <Text style={styles.selectTimeButtonText}>+ Select Time</Text>
+                        </TouchableOpacity>
+
                         {/* Display Added Times */}
                         {newMedTimes.length > 0 && (
                             <View style={styles.addedTimesContainer}>
@@ -529,6 +533,7 @@ export default function ProfileDetailScreen() {
                             </View>
                         )}
                     </View>
+                    {/* --- End UPDATED Time Input Section --- */}
                     <View style={styles.inputGroup}>
                         <ThemedText style={styles.inputLabel}>Duration (Days):</ThemedText>
                         <TextInput
@@ -617,6 +622,26 @@ export default function ProfileDetailScreen() {
                 </ThemedView>
 
             </ScrollView>
+            {/* --- Date Picker Modal --- */}
+            <DatePicker
+                modal
+                open={isTimePickerVisible}
+                date={pickerDate} // Use a state variable for the picker's current date
+                mode="time" // Specify time picking mode
+                onConfirm={(date) => {
+                    setPickerDate(date); // Update the picker date state
+                    handleConfirmTime(date); // Handle the confirmed time
+                }}
+                onCancel={() => {
+                    setIsTimePickerVisible(false); // Just close the modal
+                }}
+                // Optional: Customize title, confirm/cancel text
+                title="Select Medication Time"
+                confirmText="Confirm Time"
+                cancelText="Cancel"
+            // Optional: Set minute interval if needed
+            // minuteInterval={15}
+            />
         </ThemedView>
     );
 }
@@ -755,15 +780,7 @@ const styles = StyleSheet.create({
     syncInfoText: {
         textAlign: 'center', marginTop: 10, fontSize: 14, color: '#666',
     },
-    addTimeContainer: { flexDirection: 'row', alignItems: 'center', gap: 8, },
-    timeInput: {
-        flex: 1, height: 44, borderColor: '#ccc', borderWidth: 1, borderRadius: 8,
-        paddingHorizontal: 12, backgroundColor: '#fff', fontSize: 16, color: '#333',
-    },
-    addTimeButton: {
-        backgroundColor: '#5ac8fa', paddingVertical: 11, paddingHorizontal: 15, borderRadius: 8,
-    },
-    addTimeButtonText: { color: 'white', fontSize: 14, fontWeight: 'bold', },
+
     addedTimesContainer: {
         flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10,
     },
@@ -777,4 +794,17 @@ const styles = StyleSheet.create({
         justifyContent: 'center', alignItems: 'center',
     },
     removeTimeButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 12, lineHeight: 18, },
+    selectTimeButton: {
+        backgroundColor: '#5ac8fa', // Similar to old add button
+        paddingVertical: 11,
+        paddingHorizontal: 15,
+        borderRadius: 8,
+        alignSelf: 'flex-start', // Don't take full width
+        marginBottom: 10, // Add space before added times list
+    },
+    selectTimeButtonText: {
+        color: 'white',
+        fontSize: 14,
+        fontWeight: 'bold',
+    },
 });

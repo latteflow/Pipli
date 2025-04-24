@@ -27,6 +27,7 @@
         "react-native": "0.76.7",
         "react-native-base64": "^0.2.1",
         "react-native-ble-plx": "^3.5.0",
+        "react-native-date-picker": "^5.0.12",
         "react-native-gesture-handler": "~2.20.2",
         "react-native-permissions": "^5.3.0",
         "react-native-reanimated": "~3.16.7",
@@ -1507,6 +1508,8 @@
     "react-native-base64": ["react-native-base64@0.2.1", "", {}, "sha512-eHgt/MA8y5ZF0aHfZ1aTPcIkDWxza9AaEk4GcpIX+ZYfZ04RcaNahO+527KR7J44/mD3efYfM23O2C1N44ByWA=="],
 
     "react-native-ble-plx": ["react-native-ble-plx@3.5.0", "", { "peerDependencies": { "react": "*", "react-native": "*" } }, "sha512-PeSnRswHLwLRVMQkOfDaRICtrGmo94WGKhlSC09XmHlqX2EuYgH+vNJpGcLkd8lyiYpEJyf8wlFAdj9Akliwmw=="],
+
+    "react-native-date-picker": ["react-native-date-picker@5.0.12", "", { "peerDependencies": { "react": ">= 17.0.1", "react-native": ">= 0.64.3" } }, "sha512-R/mUnCKhcuxbhKPFwYdBQCxQt9HHLqpM4ruRUqlcBjiUZ3N2wdnwOMyc888Ps8qp8e7v29PrDHtUlG8LPuFn9w=="],
 
     "react-native-gesture-handler": ["react-native-gesture-handler@2.20.2", "", { "dependencies": { "@egjs/hammerjs": "^2.0.17", "hoist-non-react-statics": "^3.3.0", "invariant": "^2.2.4", "prop-types": "^15.7.2" }, "peerDependencies": { "react": "*", "react-native": "*" } }, "sha512-HqzFpFczV4qCnwKlvSAvpzEXisL+Z9fsR08YV5LfJDkzuArMhBu2sOoSPUF/K62PCoAb+ObGlTC83TKHfUd0vg=="],
 
