@@ -7,7 +7,8 @@ import { Medication } from '@/types/pipli'; // Adjust the import path as needed
  * on a specific reference date.
  * Returns null if parsing fails or the time string is invalid.
  */
-const calculateTimestampForTime = (timeStr: string, referenceDate: Date): number | null => {
+export const calculateTimestampForTime = (timeStr: string, referenceDate: Date): number | null => {
+    // ... function body remains the same
     const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
     if (!match) {
         console.warn(`[calculateTimestampForTime] Invalid time format: ${timeStr}`);

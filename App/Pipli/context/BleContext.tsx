@@ -1,18 +1,17 @@
 // context/BleContext.tsx
-import React, { createContext, useContext, ReactNode, useState, useCallback } from 'react';
+import React, { createContext, useContext, ReactNode, useCallback } from 'react'; // Added useCallback
 import { Device } from 'react-native-ble-plx';
 import useBLE from '@/hooks/useBle'; // Assuming useBLE hook is in hooks directory
 
 // Define the shape of the context data based on useBLE's return type
-// Add other properties from useBLE if needed elsewhere via context
 interface BleContextType {
     requestPermissions: () => Promise<boolean>;
     scanForPeripherals: () => void;
     connectToDevice: (device: Device) => Promise<void>;
     disconnectFromDevice: () => Promise<void>;
-    sendData: (data: string) => Promise<void>; // Crucial for sending data
+    sendData: (data: string) => Promise<void>;
     allDevices: Device[];
-    connectedDevice: Device | null; // Crucial for checking connection status
+    connectedDevice: Device | null;
 
     // --- NEW & UPDATED ---
     /**
@@ -24,18 +23,16 @@ interface BleContextType {
     /**
      * Function to clear the receivedData state back to null.
      * Useful after processing the received data to prevent reprocessing.
-     * NOTE: This now uses the 'setValue' function assumed to be returned by useBLE.
+     * NOTE: This now uses the 'clearValue' function assumed to be returned by useBLE.
      */
     clearReceivedData: () => void;
     // --- END NEW & UPDATED ---
 
-    // Add isLoading, errors, etc. if your useBLE hook provides them and you need them globally
-    // Example:
-    // isLoading: boolean;
-    // error: string | null;
+    // isLoading?: boolean; // Uncomment if useBLE provides these
+    // error?: string | null;
 }
 
-// Create the context with a default value (can be undefined or null initially)
+// Create the context with a default value
 const BleContext = createContext<BleContextType | undefined>(undefined);
 
 // Create a provider component
@@ -45,20 +42,9 @@ interface BleProviderProps {
 
 export const BleProvider: React.FC<BleProviderProps> = ({ children }) => {
     // Call the hook internally.
-    // *** IMPORTANT ***: This assumes `useBLE` hook returns an object containing
-    // 'value' (for received data) and 'setValue' (the state setter for 'value').
+    // *** IMPORTANT ***: Assumes `useBLE` hook now returns an object containing
+    // 'value' (for received data) and 'clearValue' (the function to clear 'value').
     const bleDataFromHook = useBLE();
-
-    // Define the clear function using the hook's setValue
-    // This assumes bleDataFromHook has a 'setValue' method corresponding to its 'value' state.
-    const handleClearReceivedData = useCallback(() => {
-        // Check if setValue exists before calling it
-        if (typeof bleDataFromHook.setValue === 'function') {
-            bleDataFromHook.setValue(null); // Set the state in useBLE back to null
-        } else {
-            console.error("BleContext: Cannot clear received data because `setValue` function is missing from `useBLE` hook's return value.");
-        }
-    }, [bleDataFromHook.setValue]); // Dependency on the setValue function itself
 
     // Construct the context value based on what useBLE provides.
     const contextValue: BleContextType = {
@@ -75,20 +61,25 @@ export const BleProvider: React.FC<BleProviderProps> = ({ children }) => {
         // Map the relevant fields from the hook's return value
         receivedData: bleDataFromHook.value, // Map `value` from hook to `receivedData`
 
-        // Use the handler function defined above which calls the hook's setValue
-        clearReceivedData: handleClearReceivedData,
+        // Use the 'clearValue' function directly from the hook.
+        // Provide a safe fallback if it's somehow still missing.
+        clearReceivedData: typeof bleDataFromHook.clearValue === 'function'
+            ? bleDataFromHook.clearValue
+            : () => { console.error("BleContext Error: clearReceivedData called, but clearValue function is missing from useBLE hook."); },
 
         // Pass through other potential fields if needed
         // isLoading: bleDataFromHook.isLoading,
         // error: bleDataFromHook.error,
     };
 
-    // Optional: Add a check during development if 'value' or 'setValue' are missing
-    if (bleDataFromHook.value === undefined) {
-        console.warn("BleContext: `value` property is missing from the value returned by `useBLE`. Received data might not work.");
+    // Keep the warning check during development for clarity
+    if (typeof bleDataFromHook.clearValue !== 'function') {
+        // This warning should disappear after you fix useBLE.ts
+        console.warn("BleContext Warning: `clearValue` function is missing from the value returned by `useBLE`. `clearReceivedData` will not work correctly until useBLE is updated.");
     }
-    if (typeof bleDataFromHook.setValue !== 'function') {
-        console.warn("BleContext: `setValue` function is missing from the value returned by `useBLE`. `clearReceivedData` will not work.");
+    if (bleDataFromHook.value === undefined) {
+        // Add check for value as well, just in case
+        console.warn("BleContext Warning: `value` property is missing from the value returned by `useBLE`. Received data might not work.");
     }
 
 

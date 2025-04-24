@@ -23,6 +23,30 @@ import { MedicationTimeStatus, Profile, Medication, RelationToFood, PROFILES_STO
 import { useBleContext } from '@/context/BleContext';
 import { prepareScheduleForDevice } from '@/utils/scheduleUtils';
 
+const calculateTimestampForTime = (timeStr: string, referenceDate: Date): number | null => {
+    const match = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+    if (!match) {
+        console.warn(`[calculateTimestampForTime] Invalid time format: ${timeStr}`);
+        return null;
+    }
+    let hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const period = match[3].toUpperCase();
+    if (hours < 1 || hours > 12 || minutes < 0 || minutes > 59) {
+        console.warn(`[calculateTimestampForTime] Invalid time values (12-hour format): ${timeStr}`);
+        return null;
+    }
+    if (period === 'PM' && hours !== 12) hours += 12;
+    else if (period === 'AM' && hours === 12) hours = 0;
+    if (hours < 0 || hours > 23) {
+        console.warn(`[calculateTimestampForTime] Hour calculation error: ${timeStr}`);
+        return null;
+    }
+    const specificTimeDate = new Date(referenceDate);
+    specificTimeDate.setHours(hours, minutes, 0, 0);
+    return Math.floor(specificTimeDate.getTime() / 1000);
+};
+
 // Helper to format Date object to HH:MM AM/PM string
 const formatTime = (date: Date): string => {
     return date.toLocaleTimeString('en-US', {
@@ -70,6 +94,7 @@ export default function ProfileDetailScreen() {
     const [allProfiles, setAllProfiles] = useState<Profile[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [isSendingSchedule, setIsSendingSchedule] = useState(false); // Loading state for sending schedule
+    const [isRequestingUpdate, setIsRequestingUpdate] = useState(false);
 
     // --- State for NEW medication inputs ---
     const [newMedName, setNewMedName] = useState('');
@@ -147,79 +172,100 @@ export default function ProfileDetailScreen() {
 
     // --- Effect to process received data from BLE ---
     useEffect(() => {
-        if (receivedData && profile && id) { // Ensure profile and id are available
-            console.log("[ProfileDetailScreen] Received data:", receivedData);
+        // Ensure receivedData is not null/undefined AND is not an empty/whitespace string
+        if (receivedData && receivedData.trim() && profile && id) { // Added receivedData.trim() check
+            console.log("[ProfileDetailScreen] Received data (length:", receivedData.length, "):", receivedData); // Log length too
             try {
-                // Assuming receivedData is a JSON string like the example
-                // [{"med_id":"A","ref_time":"1678886400","times":[{"time":"5","responded":false},{"time":"30","responded":true}]}]
-                // NOTE: The 'time' field from device needs mapping if it's not the exact app time string.
-                // Assuming 'time' from device IS the exact time string like "8:00 AM" for now.
-                // If 'time' from device is offset/index, this logic needs adjustment.
-                const parsedData: Array<{ med_id: string; ref_time: string; times: Array<{ time: string; responded: boolean }> }> = JSON.parse(receivedData);
+                // Example: [{"med_id":"A","ref_time":"1745519400","times":[{"time":"82020","responded":null},{"time":"13620","responded":null}]}]
+                const parsedData: Array<{
+                    med_id: string;
+                    ref_time: string;
+                    times: Array<{ time: string; responded: boolean | null }>;
+                }> = JSON.parse(receivedData); // This is where the error likely occurs
+
+                // --- Check if parsedData is actually an array (basic validation) ---
+                if (!Array.isArray(parsedData)) {
+                    throw new Error("Parsed data is not an array.");
+                }
+
+                // ... (rest of the processing logic: calculating offsets, updating statuses)
+                const refTimeDate = new Date();
+                refTimeDate.setHours(0, 0, 0, 0);
+                const refTimeSeconds = Math.floor(refTimeDate.getTime() / 1000);
 
                 let profileWasUpdated = false;
                 const updatedMedications = profile.currentMedications.map((med, medIndex) => {
-                    // Determine the expected med_id ('A', 'B', ...) based on index
-                    // This assumes the device uses the same A, B, C... mapping based on the order sent
-                    const expectedDeviceMedId = String.fromCharCode(65 + medIndex); // 'A', 'B', ...
-
-                    // Find if this medication ID matches any in the received data
+                    const expectedDeviceMedId = String.fromCharCode(65 + medIndex);
                     const deviceDataForMed = parsedData.find(d => d.med_id === expectedDeviceMedId);
 
                     if (deviceDataForMed) {
-                        console.log(`[ProfileDetailScreen] Found matching data for med ID: ${expectedDeviceMedId} (App Med: ${med.name})`);
+                        // ... (inner logic for updating timeStatuses based on offsets)
                         let medicationUpdated = false;
-
-                        // Ensure timeStatuses exists and is initialized
                         const currentTimeStatuses = med.timeStatuses && med.timeStatuses.length === med.times.length
                             ? med.timeStatuses
-                            : med.times.map(t => ({ time: t, responded: false })); // Initialize if missing/mismatched
+                            : med.times.map(t => ({ time: t, responded: false }));
 
                         const newTimeStatuses = currentTimeStatuses.map(status => {
-                            // Find the corresponding time update from the device
-                            // *** CRITICAL ASSUMPTION ***:
-                            // Assumes the `time` string from the device payload DIRECTLY matches `status.time` ("8:00 AM").
-                            // If the device sends offsets or indices, this lookup needs to change drastically.
-                            const deviceTimeUpdate = deviceDataForMed.times.find(t => t.time === status.time);
-
-                            if (deviceTimeUpdate && status.responded !== deviceTimeUpdate.responded) {
-                                console.log(`[ProfileDetailScreen] Updating status for med ${med.name}, time ${status.time} to ${deviceTimeUpdate.responded}`);
-                                medicationUpdated = true;
-                                return { ...status, responded: deviceTimeUpdate.responded };
+                            const absoluteTimestamp = calculateTimestampForTime(status.time, refTimeDate);
+                            if (absoluteTimestamp === null) {
+                                console.warn(`[ProfileDetailScreen] Could not calculate timestamp for app time: ${status.time} on med ${med.name}. Skipping status update.`);
+                                return status;
                             }
-                            return status; // No update for this time
+                            const expectedOffsetSeconds = absoluteTimestamp - refTimeSeconds;
+                            const expectedOffsetString = expectedOffsetSeconds.toString();
+                            const deviceTimeUpdate = deviceDataForMed.times.find(t => t.time === expectedOffsetString);
+
+                            if (deviceTimeUpdate) {
+                                const newRespondedState = deviceTimeUpdate.responded === true;
+                                if (status.responded !== newRespondedState) {
+                                    console.log(`[ProfileDetailScreen] Updating status for med ${med.name}, time ${status.time} (offset ${expectedOffsetString}s) to ${newRespondedState}`);
+                                    medicationUpdated = true;
+                                    return { ...status, responded: newRespondedState };
+                                }
+                            }
+                            return status;
                         });
 
                         if (medicationUpdated) {
                             profileWasUpdated = true;
                             return { ...med, timeStatuses: newTimeStatuses };
                         }
-                    } else {
-                        console.log(`[ProfileDetailScreen] No matching device data found for expected med_id: ${expectedDeviceMedId} (App Med: ${med.name})`);
+                        // ...
                     }
-                    return med; // No update for this medication
+                    return med;
                 });
 
                 if (profileWasUpdated) {
                     console.log("[ProfileDetailScreen] Profile updated with device status.");
                     const updatedProfile = { ...profile, currentMedications: updatedMedications };
-                    // Update all profiles state and save
                     const updatedAllProfiles = allProfiles.map(p => p.id === id ? updatedProfile : p);
-                    saveAllProfiles(updatedAllProfiles); // This already calls setProfile internally
+                    saveAllProfiles(updatedAllProfiles);
                 } else {
                     console.log("[ProfileDetailScreen] Received data did not result in profile updates.");
                 }
+                // --- End of processing logic ---
 
-            } catch (error) {
-                console.error("[ProfileDetailScreen] Failed to parse or process received BLE data:", error);
-                Alert.alert("Data Error", "Received invalid data from the device.");
+            } catch (error: any) { // Catch specific error types if needed, e.g., SyntaxError
+                console.error(
+                    "[ProfileDetailScreen] Failed to parse or process received BLE data.",
+                    "Error:", error.message, // Log the error message
+                    "Received Data:", receivedData // *** Log the actual data that caused the error ***
+                );
+                // Optional: Alert only if it's not just an empty string?
+                // if (receivedData.trim().length > 0) {
+                Alert.alert("Data Error", `Received invalid data from the device: ${error.message}`);
+                // }
             } finally {
-                // Signal that we've processed the data (important to prevent re-processing)
-                clearReceivedData?.(); // Use optional chaining
+                // Always clear the data, even if processing failed, to prevent reprocessing bad data
+                console.log("[ProfileDetailScreen] Clearing received data.");
+                clearReceivedData?.();
             }
+        } else if (receivedData === "") { // Explicitly handle empty string case if needed
+            console.log("[ProfileDetailScreen] Received empty string data. Clearing.");
+            clearReceivedData?.(); // Clear empty string immediately
         }
-        // Add clearReceivedData and other necessary dependencies
-    }, [receivedData, profile, allProfiles, id, saveAllProfiles, clearReceivedData]);
+        // No 'else' needed if receivedData is null/undefined, the main 'if' handles that
+    }, [receivedData, profile, allProfiles, id, saveAllProfiles, clearReceivedData]); // Dependencies
 
 
     // --- Reset New Medication Form ---
@@ -470,6 +516,39 @@ export default function ProfileDetailScreen() {
         }
     };
 
+
+    // --- NEW Handler to Request Update ---
+    const handleRequestUpdate = async () => {
+        if (!connectedDevice) {
+            Alert.alert("Not Connected", "Please connect to the Pipli device first via the 'Connect' tab.");
+            return;
+        }
+        // Optional: Check if already sending schedule or requesting update
+        if (isSendingSchedule || isRequestingUpdate) {
+            console.log("[handleRequestUpdate] Ignoring request, already busy.");
+            return;
+        }
+
+        setIsRequestingUpdate(true);
+        console.log("[handleRequestUpdate] Sending command: SEND_UPDATE");
+        try {
+            await sendData("SEND_UPDATE");
+            // Optional: Show a temporary confirmation that the request was sent
+            // Alert.alert("Request Sent", "Requesting status update from device...");
+            console.log("[handleRequestUpdate] 'SEND_UPDATE' command sent successfully.");
+            // Note: The actual UI update happens when receivedData triggers the useEffect hook.
+        } catch (error: any) {
+            console.error("[handleRequestUpdate] Failed to send 'SEND_UPDATE' command:", error);
+            Alert.alert("Request Error", `Failed to request update: ${error.message || 'Unknown error'}`);
+        } finally {
+            // Set loading state back to false after a short delay to allow BLE processing,
+            // or rely on the useEffect hook to indicate completion implicitly.
+            // For simplicity, let's just set it back here. The UI update will follow via useEffect.
+            setIsRequestingUpdate(false);
+        }
+    };
+    // ---
+
     // --- Main Render Logic ---
 
     if (isLoading) {
@@ -493,6 +572,9 @@ export default function ProfileDetailScreen() {
             </ThemedView>
         );
     }
+
+    // Determine if any sync operation is in progress
+    const isSyncBusy = isSendingSchedule || isRequestingUpdate;
 
     return (
         <ThemedView style={styles.container}>
@@ -613,6 +695,23 @@ export default function ProfileDetailScreen() {
                         ) : (
                             <Text style={styles.syncButtonText}>
                                 {connectedDevice ? "Send Schedule to Pipli" : "Connect Device First"}
+                            </Text>
+                        )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                        onPress={handleRequestUpdate}
+                        style={[
+                            styles.updateButton, // Use a new style for distinction
+                            (!connectedDevice || isSyncBusy) && styles.syncButtonDisabled // Disable if not connected OR busy
+                        ]}
+                        disabled={!connectedDevice || isSyncBusy} // Disable if not connected OR busy
+                    >
+                        {isRequestingUpdate ? (
+                            <ActivityIndicator color="#fff" size="small" />
+                        ) : (
+                            <Text style={styles.updateButtonText}>
+                                {connectedDevice ? "Request Status Update" : "Connect Device First"}
                             </Text>
                         )}
                     </TouchableOpacity>
@@ -807,4 +906,20 @@ const styles = StyleSheet.create({
         fontSize: 14,
         fontWeight: 'bold',
     },
+
+    updateButton: {
+        backgroundColor: '#007AFF', // Blue color for distinction
+        paddingVertical: 14,
+        paddingHorizontal: 20,
+        borderRadius: 8,
+        alignItems: 'center',
+        marginTop: 10, // Add space between buttons
+    },
+    updateButtonText: {
+        color: 'white',
+        fontSize: 16,
+        fontWeight: 'bold',
+    },
+
+
 });

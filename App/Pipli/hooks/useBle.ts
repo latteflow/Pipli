@@ -1,6 +1,6 @@
 /* eslint-disable no-bitwise */
 // @/hooks/useBle.ts
-import { useMemo, useState } from "react";
+import { useRef, useCallback, useMemo, useState } from "react";
 import { PermissionsAndroid, Platform } from "react-native";
 import {
     BleManager,
@@ -27,6 +27,7 @@ interface BluetoothLowEnergyApi {
     allDevices: Device[];
     connectedDevice: Device | null;
     value: string | null; // Assuming 'value' holds the read data
+    clearValue: () => void; // Function to clear the read value
 }
 
 function useBLE(): BluetoothLowEnergyApi {
@@ -37,6 +38,10 @@ function useBLE(): BluetoothLowEnergyApi {
 
     // Subscription reference for cleanup
     const [notificationSubscription, setNotificationSubscription] = useState<Subscription | null>(null);
+
+    const [dataBuffer, setDataBuffer] = useState<string>('');
+    const messageTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const MESSAGE_TIMEOUT_MS = 400; // Adjust timeout (e.g., 100-250ms)
 
     const requestPermissions = async (): Promise<boolean> => {
         if (Platform.OS === 'android') {
@@ -132,7 +137,7 @@ function useBLE(): BluetoothLowEnergyApi {
             // --- --- --- --- --- --- --- --- --- --- ---
 
             // --- Start listening for notifications (your existing read logic) ---
-            startStreamingData(connected);
+            monitorDataCharacteristic(connected);
             // --- --- --- --- --- --- --- --- --- --- ---
 
         } catch (e) {
@@ -169,36 +174,6 @@ function useBLE(): BluetoothLowEnergyApi {
         }
     };
 
-    // --- Function to handle reading data (notifications/indications) ---
-    const startStreamingData = (device: Device) => {
-        if (device) {
-            console.log("Setting up notifications for:", DATA_READ_CHARACTERISTIC_UUID);
-            const subscription = device.monitorCharacteristicForService(
-                SERVICE_UUID,
-                DATA_READ_CHARACTERISTIC_UUID,
-                (error, characteristic) => {
-                    if (error) {
-                        console.error("Notification Error:", error.message, "Reason:", error.reason);
-                        // Consider disconnecting or handling the error
-                        if (error.errorCode === 201) { // Device disconnected
-                            disconnectFromDevice();
-                        }
-                        return;
-                    }
-                    if (characteristic?.value) {
-                        const rawValue = base64.decode(characteristic.value);
-                        console.log("Received data:", rawValue);
-                        setValue(rawValue); // Update state with decoded value
-                    }
-                }
-            );
-            setNotificationSubscription(subscription); // Store subscription for cleanup
-        } else {
-            console.error("Cannot start streaming, device not connected.");
-        }
-    };
-    // --- --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
-
     // --- Function to send data (write characteristic) ---
     const sendData = async (data: string) => {
         if (!connectedDevice) {
@@ -232,6 +207,76 @@ function useBLE(): BluetoothLowEnergyApi {
     };
     // --- --- --- --- --- --- --- --- --- --- --- --- --- --- ---
 
+    const monitorDataCharacteristic = (device: Device) => {
+        // --- Add this line ---
+        console.log("Setting up buffered notifications for:", DATA_READ_CHARACTERISTIC_UUID);
+        // --- --- --- --- ---
+        const subscription = device.monitorCharacteristicForService( // Store the result
+            SERVICE_UUID,
+            DATA_READ_CHARACTERISTIC_UUID,
+            (error, characteristic) => {
+                if (error) {
+                    console.error("Buffered Notification Error:", error.message, "Reason:", error.reason); // Log specific error
+                    if (error.errorCode === 201) { disconnectFromDevice(); }
+                    return;
+                }
+                if (characteristic?.value) {
+                    // --- Ensure consistent decoding ---
+                    let newDataChunk = '';
+                    try {
+                        // Use the imported base64 library to decode
+                        newDataChunk = base64.decode(characteristic.value);
+                    } catch (decodeError) {
+                        console.error("Error decoding base64 chunk:", decodeError);
+                        return; // Skip this chunk if decoding fails
+                    }
+                    // --- --- --- --- --- --- --- --- ---
+
+                    console.log(`[useBLE - Buffer] Received chunk: ${newDataChunk}`); // Add identifier
+
+                    // Append new chunk
+                    setDataBuffer(prevBuffer => prevBuffer + newDataChunk);
+
+                    // Clear any existing timeout
+                    if (messageTimeoutRef.current) {
+                        clearTimeout(messageTimeoutRef.current);
+                    }
+
+                    // Set a new timeout to process the buffer after a short delay
+                    messageTimeoutRef.current = setTimeout(() => {
+                        // Use a temporary variable to hold the buffer content at the time timeout fires
+                        // Read the state directly within the timeout to get the most up-to-date buffer
+                        setDataBuffer(currentBuffer => {
+                            if (currentBuffer) { // Check if the current buffer has data
+                                console.log(`[useBLE - Buffer] Timeout fired. Processing buffer: ${currentBuffer}`);
+                                setValue(currentBuffer); // Update state with the accumulated buffer
+                                // Return empty string to clear the buffer state AFTER processing
+                                return '';
+                            } else {
+                                console.log(`[useBLE - Buffer] Timeout fired, but buffer was empty.`);
+                                return ''; // Still clear if somehow empty
+                            }
+                        });
+                        messageTimeoutRef.current = null; // Clear the ref
+                    }, MESSAGE_TIMEOUT_MS);
+                }
+            }
+        );
+        // --- Add this line ---
+        setNotificationSubscription(subscription); // Store subscription for cleanup
+        // --- --- --- --- ---
+    };
+
+    // Ensure 'clearValue' also clears the buffer and any pending timeout
+    const clearValue = useCallback(() => {
+        setValue(null);
+        setDataBuffer('');
+        if (messageTimeoutRef.current) {
+            clearTimeout(messageTimeoutRef.current);
+            messageTimeoutRef.current = null;
+        }
+    }, []);
+
     return {
         requestPermissions,
         scanForPeripherals,
@@ -241,6 +286,7 @@ function useBLE(): BluetoothLowEnergyApi {
         allDevices,
         connectedDevice,
         value,
+        clearValue
     };
 }
 
