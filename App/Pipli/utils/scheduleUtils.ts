@@ -102,7 +102,6 @@ export const prepareScheduleForDevice = (
                 }
                 return null; // Exclude this medication
             }
-
             return {
                 med_id: med_id,
                 ref_time: refTimeString,
