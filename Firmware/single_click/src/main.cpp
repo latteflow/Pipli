@@ -18,6 +18,9 @@
 
 #define FORMAT_LITTLEFS_IF_FAILED true
 #define SCHEDULE_FILENAME "/schedule.json"
+#define MILLIS_COUNTER_FILENAME "/millis_counter.dat" // File to store last millis()
+
+unsigned long lastMillisSaveTime = 0; // Timer for saving millis counter
 
 BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
@@ -81,6 +84,9 @@ void processSchedule();
 void sendUpdate(bool changeStateToIdleOnSuccess = true);
 // void moveToNextReminder(); // No longer needed
 void handleReceivedData(const std::string &data);
+
+bool saveMillisCounter();
+unsigned long loadMillisCounter();
 
 // Stream opearator (kept from original)
 template <class T>
@@ -172,112 +178,193 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
     }
 };
 
+// --- Function to save the current millis() counter ---
+bool saveMillisCounter()
+{
+    unsigned long currentMillis = millis();
+    File file = LittleFS.open(MILLIS_COUNTER_FILENAME, FILE_WRITE); // Open for writing (overwrite)
+    if (!file)
+    {
+        Serial.println("Failed to open millis counter file for writing");
+        return false;
+    }
+
+    // Write the current millis() value as binary data
+    size_t bytesWritten = file.write((uint8_t *)&currentMillis, sizeof(currentMillis));
+    file.close();
+
+    if (bytesWritten == sizeof(currentMillis))
+    {
+        // Serial.printf("Millis counter saved: %lu\n", currentMillis); // Optional: Verbose logging
+        return true;
+    }
+    else
+    {
+        Serial.println("Failed to write millis counter to file.");
+        LittleFS.remove(MILLIS_COUNTER_FILENAME); // Attempt to remove potentially corrupted file
+        return false;
+    }
+}
+
+// --- Function to load the last saved millis() counter ---
+unsigned long loadMillisCounter()
+{
+    if (!LittleFS.exists(MILLIS_COUNTER_FILENAME))
+    {
+        Serial.println("Millis counter file not found.");
+        return 0; // Return 0 if no previous value exists
+    }
+
+    File file = LittleFS.open(MILLIS_COUNTER_FILENAME, FILE_READ);
+    if (!file)
+    {
+        Serial.println("Failed to open millis counter file for reading");
+        return 0;
+    }
+
+    unsigned long loadedMillis = 0;
+    if (file.size() == sizeof(loadedMillis))
+    {
+        size_t bytesRead = file.read((uint8_t *)&loadedMillis, sizeof(loadedMillis));
+        if (bytesRead != sizeof(loadedMillis))
+        {
+            Serial.println("Error reading millis counter file.");
+            loadedMillis = 0; // Treat read error as if file didn't exist
+        }
+    }
+    else
+    {
+        Serial.println("Millis counter file has incorrect size.");
+        loadedMillis = 0; // Treat size error as if file didn't exist
+    }
+
+    file.close();
+
+    if (loadedMillis > 0)
+    {
+        Serial.printf("Loaded last known millis: %lu\n", loadedMillis);
+    }
+    return loadedMillis;
+}
+
 // --- Schedule Handling Logic ---
 
 void handleReceivedData(const std::string &data)
 {
-    Serial.println("Attempting to parse schedule...");
-    // Clear previous schedule data
-    scheduleDoc.clear(); // Make sure you are using DynamicJsonDocument or have allocated enough static memory
-    DeserializationError error = deserializeJson(scheduleDoc, data);
+    Serial.println("Attempting to parse NEW schedule data string...");
 
-    if (error)
+    // --- Parse the incoming data string as a temporary array ---
+    JsonDocument tempDoc; // Use a temporary document for the incoming array
+    DeserializationError tempError = deserializeJson(tempDoc, data);
+    if (tempError)
     {
-        Serial.print(F("deserializeJson() failed: "));
-        Serial.println(error.f_str());
-        scheduleLoaded = false;
+        Serial.print(F("Initial parsing of received string failed: "));
+        Serial.println(tempError.f_str());
+        // Don't change state or clear existing valid schedule if parsing fails
+        return;
+    }
+    if (!tempDoc.is<JsonArray>())
+    {
+        Serial.println("Error: Received data string is not a JSON array.");
+        return;
+    }
+    JsonArray receivedArray = tempDoc.as<JsonArray>();
+    // --- End temporary parsing ---
+
+    // --- Prepare the main scheduleDoc with the new structure ---
+    scheduleDoc.clear();                            // Clear previous data
+    JsonObject root = scheduleDoc.to<JsonObject>(); // Make the root an object
+    JsonArray scheduleArray = root.createNestedArray("schedule");
+    if (scheduleArray.isNull())
+    {
+        Serial.println("Error: Failed to create nested schedule array. Memory full?");
+        scheduleLoaded = false; // Mark as not loaded
         currentState = STATE_IDLE;
         return;
     }
+    // --- End structure preparation ---
 
-    if (!scheduleDoc.is<JsonArray>())
-    {
-        Serial.println("Error: Received JSON is not an array.");
-        scheduleLoaded = false;
-        currentState = STATE_IDLE;
-        return;
-    }
-
-    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
-    bool structureUpdateSuccess = true; // Flag to track success
-
-    for (JsonObject med : scheduleArray)
-    {
-        if (med.containsKey("times") && med["times"].is<JsonArray>())
+    // --- Populate the new schedule array with structured time objects ---
+    bool structureUpdateSuccess = true;
+    for (JsonObject med_in : receivedArray)
+    { // Iterate the temporary parsed array
+        // Create a corresponding object in the main scheduleDoc's array
+        JsonObject med_out = scheduleArray.createNestedObject();
+        if (med_out.isNull())
         {
-            // Temporarily store original time strings because we modify the object
-            std::vector<String> originalTimeStrings;
-            JsonArray originalTimes = med["times"].as<JsonArray>();
-            for (JsonVariant t : originalTimes)
-            {
-                originalTimeStrings.push_back(t.as<String>());
-            }
+            Serial.println("Error: Failed to create medication object. Memory full?");
+            structureUpdateSuccess = false;
+            break;
+        }
+        // Copy necessary fields (adjust if you have more fields)
+        med_out["med_id"] = med_in["med_id"]; // Assuming med_id exists
 
-            // *** FIX: Create the new array directly nested within 'med' ***
-            // This ensures it uses scheduleDoc's memory pool.
-            // It implicitly removes/replaces the old "times" key.
-            JsonArray newTimesArray = med.createNestedArray("times");
-            if (newTimesArray.isNull())
+        if (med_in.containsKey("times") && med_in["times"].is<JsonArray>())
+        {
+            JsonArray times_in = med_in["times"].as<JsonArray>();
+            JsonArray times_out = med_out.createNestedArray("times");
+            if (times_out.isNull())
             {
                 Serial.println("Error: Failed to create nested times array. Memory full?");
                 structureUpdateSuccess = false;
-                break; // Exit the loop on memory error
+                break;
             }
 
-            // Populate the newly created nested array
-            for (const String &t_str : originalTimeStrings)
+            for (JsonVariant t_in : times_in)
             {
-                JsonObject timeObj = newTimesArray.createNestedObject();
-                if (timeObj.isNull())
+                JsonObject timeObj_out = times_out.createNestedObject();
+                if (timeObj_out.isNull())
                 {
                     Serial.println("Error: Failed to create nested time object. Memory full?");
                     structureUpdateSuccess = false;
-                    break; // Exit the inner loop
+                    break;
                 }
-                timeObj["time"] = t_str;
-                // Use JsonNull to clearly indicate "not yet responded" vs "responded false"
-                timeObj["responded"] = nullptr;
+                timeObj_out["time"] = t_in.as<String>(); // Copy time offset
+                timeObj_out["responded"] = nullptr;      // Initialize responded state
             }
             if (!structureUpdateSuccess)
-                break; // Exit outer loop if inner loop failed
+                break;
         }
         else
         {
             Serial.println("Warning: Medication entry missing 'times' array or invalid format.");
-            // Decide if this is an error or just needs skipping
-            // structureUpdateSuccess = false; // Uncomment if this should halt processing
-            // break;
+            // Handle as needed, maybe skip this medication entry
         }
-    } // End for loop iterating through medications
+    } // --- End populating ---
 
     if (!structureUpdateSuccess)
     {
-        Serial.println("Failed to update schedule structure. Aborting.");
+        Serial.println("Failed to build new schedule structure. Aborting.");
         scheduleLoaded = false;
         currentState = STATE_IDLE;
         scheduleDoc.clear(); // Clear potentially corrupted document
         return;
     }
 
-    Serial.println("Schedule parsed and structure updated successfully.");
+    // --- Store the original receive time ---
+    scheduleReceiveTime = millis();                    // Get the current time
+    root["originalReceiveTime"] = scheduleReceiveTime; // Store it in the JSON object
+    // --- End storing time ---
+
+    Serial.println("New schedule processed and structured successfully.");
+    Serial.printf("Original Receive Time recorded: %lu\n", scheduleReceiveTime);
 
     // --- Debug: Print the modified structure ---
-    Serial.println("--- Modified Structure ---");
+    Serial.println("--- New Schedule Structure ---");
     serializeJsonPretty(scheduleDoc, Serial);
-    Serial.println("\n------------------------");
+    Serial.println("\n----------------------------");
 
     scheduleLoaded = true;
-    scheduleReceiveTime = millis();
     // Reset indices - processSchedule will find the first one
     currentMedIndex = -1;
     currentTimeIndex = -1;
     currentState = STATE_PROCESSING_SCHEDULE;
     Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
 
-    // Save the initial schedule (now with correct structure)
+    // Save the new schedule (with timestamp)
     if (!saveSchedule())
     {
-        Serial.println("Error saving initial schedule!");
+        Serial.println("Error saving new schedule!");
         // Handle error? Maybe revert state?
     }
 }
@@ -286,13 +373,13 @@ void handleReceivedData(const std::string &data)
 // Scans the entire schedule to find the earliest *absolute* time for the next reminder
 void processSchedule()
 {
-    if (!scheduleLoaded || scheduleDoc.isNull() || !scheduleDoc.is<JsonArray>())
+    if (!scheduleLoaded || !scheduleDoc.is<JsonObject>() || !scheduleDoc.containsKey("schedule"))
     {
         currentState = STATE_IDLE;
         return;
     }
 
-    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    JsonArray scheduleArray = scheduleDoc["schedule"].as<JsonArray>();
     unsigned long currentTimeMillis = millis();
 
     // Variables to track the earliest due reminder found in this scan
@@ -396,14 +483,14 @@ void processSchedule()
 void recordResponse(bool responded)
 {
     // Check if indices are valid (should be set by processSchedule before VIBRATING state)
-    if (!scheduleLoaded || scheduleDoc.isNull() || !scheduleDoc.is<JsonArray>() || currentMedIndex < 0 || currentTimeIndex < 0)
+    if (!scheduleLoaded || !scheduleDoc.is<JsonObject>() || !scheduleDoc.containsKey("schedule") || currentMedIndex < 0 || currentTimeIndex < 0)
     {
         Serial.println("Error: Cannot record response, schedule not loaded or indices invalid.");
-        currentState = STATE_IDLE; // Go idle to prevent issues
+        currentState = STATE_IDLE;
         return;
     }
 
-    JsonArray scheduleArray = scheduleDoc.as<JsonArray>();
+    JsonArray scheduleArray = scheduleDoc["schedule"].as<JsonArray>();
     // Bounds check just in case
     if (currentMedIndex >= scheduleArray.size())
     {
@@ -439,12 +526,8 @@ void recordResponse(bool responded)
     // Save the updated schedule after recording response
     saveSchedule();
 
-    // --- No longer move to next reminder explicitly ---
-    // moveToNextReminder();
-
-    // Reset active indices
-    // currentMedIndex = -1; // Optional: Reset, but processSchedule will overwrite anyway
-    // currentTimeIndex = -1;
+    // *** Save the current millis counter immediately after recording response ***
+    saveMillisCounter();
 
     // Go back to processing state to find the *next* earliest reminder
     currentState = STATE_PROCESSING_SCHEDULE;
@@ -540,15 +623,13 @@ bool initializeFS()
 
 bool saveSchedule()
 {
-    if (!scheduleLoaded || scheduleDoc.isNull())
+    // --- Check if data is loaded and is the correct object type ---
+    if (!scheduleLoaded || !scheduleDoc.is<JsonObject>())
     {
-        Serial.println("No schedule data to save.");
-        // Optionally delete existing file if schedule is cleared
-        // if (LittleFS.exists(SCHEDULE_FILENAME)) {
-        //     LittleFS.remove(SCHEDULE_FILENAME);
-        // }
+        Serial.println("No valid schedule data (object) to save.");
         return false;
     }
+    // --- End check ---
 
     File file = LittleFS.open(SCHEDULE_FILENAME, FILE_WRITE);
     if (!file)
@@ -557,7 +638,8 @@ bool saveSchedule()
         return false;
     }
 
-    size_t bytesWritten = serializeJson(scheduleDoc, file);
+    // Use compact JSON for saving to save space on flash
+    size_t bytesWritten = serializeJson(scheduleDoc, file); // Serialize the whole object
     file.close();
 
     if (bytesWritten > 0)
@@ -573,11 +655,13 @@ bool saveSchedule()
         return false;
     }
 }
+
 bool loadSchedule()
 {
     if (!LittleFS.exists(SCHEDULE_FILENAME))
     {
         Serial.println("Schedule file not found.");
+        scheduleLoaded = false; // Ensure flag is false
         return false;
     }
 
@@ -585,6 +669,7 @@ bool loadSchedule()
     if (!file)
     {
         Serial.println("Failed to open schedule file for reading");
+        scheduleLoaded = false; // Ensure flag is false
         return false;
     }
 
@@ -596,23 +681,42 @@ bool loadSchedule()
     {
         Serial.print(F("Failed to parse schedule file: "));
         Serial.println(error.f_str());
+        scheduleLoaded = false; // Ensure flag is false
         return false;
     }
 
-    if (!scheduleDoc.is<JsonArray>())
+    // --- Check for new object structure ---
+    if (!scheduleDoc.is<JsonObject>() || !scheduleDoc.containsKey("schedule") || !scheduleDoc["schedule"].is<JsonArray>() || !scheduleDoc.containsKey("originalReceiveTime"))
     {
-        Serial.println("Error: Loaded schedule file is not a JSON array.");
+        Serial.println("Error: Loaded schedule file has incorrect structure or missing keys (originalReceiveTime).");
+        scheduleDoc.clear();    // Clear invalid data
+        scheduleLoaded = false; // Ensure flag is false
         return false;
     }
+    // --- End structure check ---
+
+    // --- Load the original timestamp INTO THE GLOBAL VARIABLE ---
+    // This is the millis() value from the boot *when the schedule was received*
+    scheduleReceiveTime = scheduleDoc["originalReceiveTime"].as<unsigned long>();
+    // --- End loading timestamp ---
 
     Serial.println("Schedule loaded successfully from LittleFS.");
+    Serial.printf("Original Receive Time (from previous boot): %lu\n", scheduleReceiveTime);
+
+    // --- Debug: Print the loaded structure ---
+    // Serial.println("--- Loaded Schedule Structure ---");
+    // serializeJsonPretty(scheduleDoc, Serial);
+    // Serial.println("\n-----------------------------");
+
     scheduleLoaded = true;
-    scheduleReceiveTime = millis(); // Treat load time as the new reference
+    // DO NOT reset scheduleReceiveTime = millis(); here!
+
     // Reset indices - processSchedule will find the first one
     currentMedIndex = -1;
     currentTimeIndex = -1;
-    currentState = STATE_PROCESSING_SCHEDULE;
-    Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
+    // State will be set in setup() after potential time adjustment
+    // currentState = STATE_PROCESSING_SCHEDULE;
+    // Serial.println("State changed to STATE_PROCESSING_SCHEDULE");
     return true;
 }
 
@@ -639,17 +743,69 @@ void setup()
     digitalWrite(VIBRATION_PIN, LOW); // Ensure vibration is off
     digitalWrite(LED, LOW);           // Ensure LED is off
 
-    // --- Try to load existing schedule ---
-    if (loadSchedule())
+    // --- Load existing schedule AND Adjust Time ---
+    unsigned long originalScheduleReceiveTime = 0;
+    bool scheduleIsValid = loadSchedule(); // Loads schedule, sets scheduleLoaded, sets global scheduleReceiveTime
+
+    if (scheduleIsValid)
     {
+        originalScheduleReceiveTime = scheduleReceiveTime; // Keep the original value loaded from file
+
+        unsigned long lastKnownMillis = loadMillisCounter(); // Load millis() saved just before last shutdown
+        unsigned long timePassedBeforeShutdown = 0;
+
+        // --- Sanity Checks for Time Adjustment ---
+        // Only adjust if both the original time and the last counter seem valid (non-zero)
+        if (lastKnownMillis > 0 && originalScheduleReceiveTime > 0)
+        {
+            // Calculate time elapsed *relative to the schedule's origin* before shutdown
+            if (lastKnownMillis >= originalScheduleReceiveTime)
+            {
+                // Normal case or rollover where lastKnownMillis wrapped PAST originalReceiveTime
+                timePassedBeforeShutdown = lastKnownMillis - originalScheduleReceiveTime;
+            }
+            else
+            {
+                // Potential rollover case OR stale counter file from a previous schedule.
+                // The rollover calculation is complex to verify without more state.
+                // A very simple heuristic: if lastKnownMillis is "small" and original is "large",
+                // assume it's a stale counter file from before the current schedule was received.
+                // Let's treat this cautiously and assume NO time passed relative to *this* schedule yet.
+                // A more advanced check could compare against ULONG_MAX, but this is safer for now.
+                Serial.println("Warning: lastKnownMillis < originalScheduleReceiveTime. Assuming stale counter or recent schedule receipt. Resetting elapsed time.");
+                timePassedBeforeShutdown = 0;
+                // // If you are SURE the device runs long enough for rollover (>49 days):
+                // timePassedBeforeShutdown = (ULONG_MAX - originalScheduleReceiveTime) + 1 + lastKnownMillis;
+            }
+            Serial.printf("Time passed before shutdown (relative to schedule): %lu ms\n", timePassedBeforeShutdown);
+        }
+        else
+        {
+            Serial.println("Could not determine time passed before shutdown (invalid counter or schedule time).");
+            timePassedBeforeShutdown = 0; // Default to no time passed if data is missing/invalid
+        }
+        // --- End Sanity Checks ---
+
+        // Adjust the global scheduleReceiveTime for the current boot session
+        scheduleReceiveTime = millis() - timePassedBeforeShutdown;
+
+        Serial.printf("Adjusted scheduleReceiveTime for current session: %lu\n", scheduleReceiveTime);
         Serial.println("Existing schedule loaded. Will start processing.");
-        // State is set to STATE_PROCESSING_SCHEDULE inside loadSchedule()
+        currentState = STATE_PROCESSING_SCHEDULE; // Now set the state
     }
-    else
+    else // loadSchedule() failed
     {
         Serial.println("No existing schedule found or load failed. Waiting for BLE connection.");
         currentState = STATE_IDLE;
+        scheduleReceiveTime = 0; // Ensure it's zero if no schedule loaded
+        // Attempt to delete potentially corrupt counter file if schedule load failed
+        if (LittleFS.exists(MILLIS_COUNTER_FILENAME))
+        {
+            Serial.println("Deleting potentially stale millis counter file.");
+            LittleFS.remove(MILLIS_COUNTER_FILENAME);
+        }
     }
+    // --- End Load and Adjust ---
 
     // --- Initialize BLE ---
     BLEDevice::init("Pipli");
@@ -682,6 +838,15 @@ void setup()
 void loop()
 {
 
+    // --- Periodically save millis counter ---
+    // Only save if a schedule is loaded, otherwise, the counter isn't very useful
+    if (scheduleLoaded && (millis() - lastMillisSaveTime >= 5000))
+    {
+        lastMillisSaveTime = millis();
+        saveMillisCounter(); // Attempt to save the current millis() value
+    }
+    // --- End periodic save ---
+
     // --- Handle Connection State Changes (Advertising) ---
     // This logic is mostly handled by callbacks now, but keep advertising restart logic
     if (!deviceConnected && oldDeviceConnected)
@@ -710,13 +875,14 @@ void loop()
         processSchedule();
 
         // --- Add Countdown Logic ---
-        if (millis() - lastCountdownPrintMillis >= 1000) // Print roughly every second
+        if (millis() - lastCountdownPrintMillis >= 1000)
         {
             lastCountdownPrintMillis = millis();
-            if (nextReminderDueTimeMillis > 0) // Check if a reminder is actually scheduled
+            if (nextReminderDueTimeMillis > 0)
             {
                 unsigned long now = millis();
-                if (nextReminderDueTimeMillis > now) // Ensure time hasn't passed
+                // nextReminderDueTimeMillis is calculated based on the adjusted scheduleReceiveTime
+                if (nextReminderDueTimeMillis > now)
                 {
                     unsigned long remainingMillis = nextReminderDueTimeMillis - now;
                     unsigned long remainingSeconds = remainingMillis / 1000;
@@ -724,13 +890,11 @@ void loop()
                 }
                 else
                 {
-                    // Time has passed or is very close, processSchedule should handle state change soon
                     // Serial.println("Next reminder is due now or very soon.");
                 }
             }
             else
             {
-                // Only print "no pending" if schedule is actually loaded, otherwise it's just idle
                 if (scheduleLoaded)
                 {
                     Serial.println("No pending reminders.");
