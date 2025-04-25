@@ -277,6 +277,7 @@ function useBLE(): BluetoothLowEnergyApi {
         }
     }, []);
 
+
     return {
         requestPermissions,
         scanForPeripherals,

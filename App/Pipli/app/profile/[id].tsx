@@ -173,22 +173,30 @@ export default function ProfileDetailScreen() {
     // --- Effect to process received data from BLE ---
     useEffect(() => {
         // Ensure receivedData is not null/undefined AND is not an empty/whitespace string
-        if (receivedData && receivedData.trim() && profile && id) { // Added receivedData.trim() check
-            console.log("[ProfileDetailScreen] Received data (length:", receivedData.length, "):", receivedData); // Log length too
+        if (receivedData && receivedData.trim() && profile && id) {
+            console.log("[ProfileDetailScreen] Received data (length:", receivedData.length, "):", receivedData);
             try {
-                // Example: [{"med_id":"A","ref_time":"1745519400","times":[{"time":"82020","responded":null},{"time":"13620","responded":null}]}]
-                const parsedData: Array<{
-                    med_id: string;
-                    ref_time: string;
-                    times: Array<{ time: string; responded: boolean | null }>;
-                }> = JSON.parse(receivedData); // This is where the error likely occurs
+                // 1. UPDATE TYPE DEFINITION for the new structure
+                const parsedData: { // Expect an object now
+                    schedule: Array<{ // The array is under the 'schedule' key
+                        med_id: string;
+                        // ref_time seems gone based on example, remove if confirmed
+                        times: Array<{ time: string; responded: boolean | null }>;
+                    }>;
+                    originalReceiveTime?: number; // Keep if needed, otherwise remove
+                } = JSON.parse(receivedData);
 
-                // --- Check if parsedData is actually an array (basic validation) ---
-                if (!Array.isArray(parsedData)) {
-                    throw new Error("Parsed data is not an array.");
+                // 3. VALIDATE STRUCTURE: Check for the object and the schedule array
+                if (typeof parsedData !== 'object' || parsedData === null || !Array.isArray(parsedData.schedule)) {
+                    throw new Error("Invalid data structure received: 'schedule' array not found or invalid.");
                 }
+                // --- END VALIDATION ---
 
-                // ... (rest of the processing logic: calculating offsets, updating statuses)
+                // 2. EXTRACT SCHEDULE ARRAY
+                const scheduleArray = parsedData.schedule;
+                // --- END EXTRACTION ---
+
+                // We still need today's midnight reference for offset calculation
                 const refTimeDate = new Date();
                 refTimeDate.setHours(0, 0, 0, 0);
                 const refTimeSeconds = Math.floor(refTimeDate.getTime() / 1000);
@@ -196,11 +204,16 @@ export default function ProfileDetailScreen() {
                 let profileWasUpdated = false;
                 const updatedMedications = profile.currentMedications.map((med, medIndex) => {
                     const expectedDeviceMedId = String.fromCharCode(65 + medIndex);
-                    const deviceDataForMed = parsedData.find(d => d.med_id === expectedDeviceMedId);
+
+                    // 4. UPDATE ITERATION: Find data within the scheduleArray
+                    const deviceDataForMed = scheduleArray.find(d => d.med_id === expectedDeviceMedId);
+                    // --- END UPDATE ---
 
                     if (deviceDataForMed) {
-                        // ... (inner logic for updating timeStatuses based on offsets)
+                        console.log(`[ProfileDetailScreen] Found matching device data for med_id: ${expectedDeviceMedId} (App Med: ${med.name})`);
                         let medicationUpdated = false;
+
+                        // The rest of this inner logic remains the same as it operates on deviceDataForMed
                         const currentTimeStatuses = med.timeStatuses && med.timeStatuses.length === med.times.length
                             ? med.timeStatuses
                             : med.times.map(t => ({ time: t, responded: false }));
@@ -208,11 +221,12 @@ export default function ProfileDetailScreen() {
                         const newTimeStatuses = currentTimeStatuses.map(status => {
                             const absoluteTimestamp = calculateTimestampForTime(status.time, refTimeDate);
                             if (absoluteTimestamp === null) {
-                                console.warn(`[ProfileDetailScreen] Could not calculate timestamp for app time: ${status.time} on med ${med.name}. Skipping status update.`);
+                                console.warn(`[ProfileDetailScreen] Could not calculate timestamp for app time: ${status.time} on med ${med.name}. Skipping.`);
                                 return status;
                             }
                             const expectedOffsetSeconds = absoluteTimestamp - refTimeSeconds;
                             const expectedOffsetString = expectedOffsetSeconds.toString();
+
                             const deviceTimeUpdate = deviceDataForMed.times.find(t => t.time === expectedOffsetString);
 
                             if (deviceTimeUpdate) {
@@ -230,11 +244,13 @@ export default function ProfileDetailScreen() {
                             profileWasUpdated = true;
                             return { ...med, timeStatuses: newTimeStatuses };
                         }
-                        // ...
+                    } else {
+                        console.log(`[ProfileDetailScreen] No matching device data found in schedule array for expected med_id: ${expectedDeviceMedId} (App Med: ${med.name})`);
                     }
                     return med;
                 });
 
+                // ... (rest of the saving logic remains the same) ...
                 if (profileWasUpdated) {
                     console.log("[ProfileDetailScreen] Profile updated with device status.");
                     const updatedProfile = { ...profile, currentMedications: updatedMedications };
@@ -243,26 +259,16 @@ export default function ProfileDetailScreen() {
                 } else {
                     console.log("[ProfileDetailScreen] Received data did not result in profile updates.");
                 }
-                // --- End of processing logic ---
 
-            } catch (error: any) { // Catch specific error types if needed, e.g., SyntaxError
-                console.error(
-                    "[ProfileDetailScreen] Failed to parse or process received BLE data.",
-                    "Error:", error.message, // Log the error message
-                    "Received Data:", receivedData // *** Log the actual data that caused the error ***
-                );
-                // Optional: Alert only if it's not just an empty string?
-                // if (receivedData.trim().length > 0) {
+            } catch (error: any) {
+                // ... (error handling remains the same) ...
+                console.error("[ProfileDetailScreen] Failed to parse or process received BLE data.", "Error:", error.message, "Received Data:", receivedData);
                 Alert.alert("Data Error", `Received invalid data from the device: ${error.message}`);
-                // }
             } finally {
-                // Always clear the data, even if processing failed, to prevent reprocessing bad data
+                // ... (clearing data remains the same) ...
                 console.log("[ProfileDetailScreen] Clearing received data.");
                 clearReceivedData?.();
             }
-        } else if (receivedData === "") { // Explicitly handle empty string case if needed
-            console.log("[ProfileDetailScreen] Received empty string data. Clearing.");
-            clearReceivedData?.(); // Clear empty string immediately
         }
         // No 'else' needed if receivedData is null/undefined, the main 'if' handles that
     }, [receivedData, profile, allProfiles, id, saveAllProfiles, clearReceivedData]); // Dependencies
